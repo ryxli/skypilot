@@ -1474,8 +1474,10 @@ class TestProvisionTimeoutPassthrough:
             config=config,
         )
 
+        # A 120 s timeout probes the partition, so the launch does not park.
         mock_wait_for_job_nodes.assert_called_once_with(mock_client, mock.ANY,
-                                                        120, 'gpu', mock.ANY)
+                                                        120, 'gpu', mock.ANY,
+                                                        None)
         # get_job_nodes should be called without wait params
         mock_client.get_job_nodes.assert_called_once_with(mock.ANY)
 
@@ -1551,7 +1553,8 @@ class TestProvisionTimeoutPassthrough:
 
         # provision_timeout=120 should be passed to _wait_for_job_nodes
         mock_wait_for_job_nodes.assert_called_once_with(mock_client, mock.ANY,
-                                                        120, 'gpu', mock.ANY)
+                                                        120, 'gpu', mock.ANY,
+                                                        None)
         # get_job_nodes should be called without wait params
         mock_client.get_job_nodes.assert_called_once_with(mock.ANY)
 

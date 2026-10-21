@@ -1,5 +1,7 @@
 """Slurm instance provisioning."""
 
+import asyncio
+import dataclasses
 import json
 import math
 import os
@@ -8,7 +10,8 @@ import shlex
 import tempfile
 import threading
 import time
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
+from typing import (Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple,
+                    Union)
 import uuid
 
 import colorama
@@ -21,6 +24,7 @@ from sky.adaptors import slurm
 from sky.provision import common
 from sky.provision import constants
 from sky.provision.slurm import utils as slurm_utils
+from sky.server.requests import continue_condition
 from sky.skylet import constants as skylet_constants
 from sky.skylet import job_lib
 from sky.utils import command_runner
@@ -47,6 +51,15 @@ _SKYLET_KEEPER_STEP_NAME = 'sky-skylet-keeper'
 def _sbatch_log_path(base_dir: str, job_id: str) -> str:
     return f'{base_dir}/{PROVISION_SCRIPTS_DIRECTORY_NAME}/slurm-{job_id}.out'
 
+
+# A launch whose Slurm job is still queued after this long releases its API
+# server worker and resumes once Slurm schedules the job, so jobs waiting in
+# the Slurm queue do not block other launches.
+_PARK_AFTER_SECONDS = 60
+_PARKED_POLL_SECONDS = 15
+# Shorter provision timeouts probe a partition before failing over to the
+# next one, so those launches keep waiting in place.
+_PARK_MIN_PROVISION_TIMEOUT_SECONDS = 600
 
 POLL_INTERVAL_SECONDS = 2
 # A Slurm status query opens one SSH command per state, so keep this lower than
@@ -242,6 +255,7 @@ def _wait_for_job_nodes(
     timeout: int,
     partition: str,
     on_pending: Callable[[str, Optional[str], Optional[int]], None],
+    park_condition: Optional['SlurmJobScheduled'] = None,
 ) -> None:
     """Wait for a Slurm job to have nodes allocated.
 
@@ -254,6 +268,13 @@ def _wait_for_job_nodes(
         on_pending: Optional callback invoked when the job is pending or
             configuring. Called with (state, reason, pending_count) where
             reason and pending_count may be None.
+        park_condition: When set and running as an API server request, a job
+            still PENDING after _PARK_AFTER_SECONDS parks the request on it
+            instead of holding the worker. Time spent parked does not count
+            toward the timeout.
+
+    Raises:
+        exceptions.ExecutionPausedError: The job is still queued in Slurm.
     """
     start_time = time.time()
     last_state = None
@@ -298,10 +319,62 @@ def _wait_for_job_nodes(
                 logger.debug(f'Failed to get pending status for job '
                              f'{job_id}: {e}')
 
+        if (state == 'PENDING' and park_condition is not None and
+                time.time() - start_time >= _PARK_AFTER_SECONDS and
+                common_utils.is_in_request_context()):
+            raise exceptions.ExecutionPausedError(
+                f'Slurm job {job_id} is queued: '
+                f'{client.get_job_reason(job_id)}',
+                hint='The launch resumes when Slurm schedules the job.',
+                retry_wait_seconds=_PARKED_POLL_SECONDS,
+                continue_condition=park_condition)
+
         time.sleep(2)
 
     raise TimeoutError(f'Job {job_id} did not get nodes allocated within '
                        f'{timeout} seconds. Last state: {last_state}')
+
+
+@dataclasses.dataclass(frozen=True)
+class SlurmJobScheduled(continue_condition.ContinueCondition):
+    """Resumes a parked launch once Slurm takes its job out of the queue."""
+
+    provider_config: Dict[str, Any]
+    job_id: str
+
+    def _queue_reason(self) -> Optional[str]:
+        client = _make_slurm_client(self.provider_config)
+        if client.get_job_state(self.job_id) != 'PENDING':
+            return None
+        return client.get_job_reason(self.job_id) or 'PENDING'
+
+    async def wait_async(
+        self,
+        *,
+        is_cancelled: Callable[[], Awaitable[bool]],
+        fallback_wait_seconds: float,
+        update_status_msg: Optional[Callable[[str], Awaitable[None]]] = None,
+    ) -> bool:
+        del fallback_wait_seconds  # Unused.
+        loop = asyncio.get_running_loop()
+        reported = None
+        while not await is_cancelled():
+            reason = await loop.run_in_executor(None, self._queue_reason)
+            if reason is None:
+                return True
+            if update_status_msg is not None and reason != reported:
+                await update_status_msg(
+                    f'Slurm job {self.job_id} is queued: {reason}')
+                reported = reason
+            await asyncio.sleep(_PARKED_POLL_SECONDS)
+        return False
+
+
+def _park_condition(provider_config: Dict[str, Any], job_id: str,
+                    timeout: int) -> Optional[SlurmJobScheduled]:
+    if 0 <= timeout < _PARK_MIN_PROVISION_TIMEOUT_SECONDS:
+        return None
+    return SlurmJobScheduled(provider_config=provider_config, job_id=job_id)
 
 
 def _record_pending_reason(cluster_name: str, reason: Optional[str],
@@ -886,6 +959,50 @@ def _wait_for_job_ready(
         time.sleep(poll_interval_seconds)
 
 
+# Container start failures that every node of the partition reproduces: the
+# image targets another CPU architecture (e.g. an arm64 image on x86 nodes).
+_IMAGE_ARCH_MISMATCH = re.compile(
+    r'enroot-switchroot: failed to execute: \S+: Exec format error')
+
+
+def _ready_signal_path(sky_base_dir: str, cluster_name_on_cloud: str) -> str:
+    home_dir = _sky_cluster_home_dir(sky_base_dir, cluster_name_on_cloud)
+    return f'{home_dir}/.sky_sbatch_ready'
+
+
+def _wait_for_job_initialized(
+    login_node_runner: 'command_runner.SSHCommandRunner',
+    client: 'slurm.SlurmClient',
+    job_id: str,
+    ready_signal: str,
+    slurm_log: str,
+) -> None:
+    """Wait for job initialization, showing the sbatch log if it fails.
+
+    Raises:
+        exceptions.ProvisionUnsupportedError: The image cannot run on the
+            partition's CPU architecture, so no retry can start it.
+    """
+    try:
+        _wait_for_job_ready(login_node_runner, client, job_id, ready_signal,
+                            slurm_log)
+    except (RuntimeError, exceptions.CommandError) as e:
+        _, stdout, _ = login_node_runner.run(['cat', '--', slurm_log],
+                                             require_outputs=True,
+                                             stream_logs=False)
+        if not stdout:
+            raise
+        logger.error(f'=== Slurm job logs ({slurm_log}) ===\n'
+                     f'{stdout}'
+                     f'=== End of Slurm job logs ===')
+        mismatch = _IMAGE_ARCH_MISMATCH.search(stdout)
+        if mismatch is None:
+            raise
+        raise exceptions.ProvisionUnsupportedError(
+            f'Container failed to start ({mismatch.group(0)}): the image does '
+            'not match the CPU architecture of this partition.') from e
+
+
 @timeline.event
 def _create_virtual_instance(
         region: str, cluster_name: str, cluster_name_on_cloud: str,
@@ -966,13 +1083,21 @@ def _create_virtual_instance(
         _record_allocation(cluster_name, slurm_cluster, job_id)
 
         # Wait for nodes to be allocated (job might be in PENDING state)
-        _wait_for_job_nodes(client, job_id, provision_timeout, partition,
-                            on_pending)
+        _wait_for_job_nodes(
+            client, job_id, provision_timeout, partition, on_pending,
+            _park_condition(provider_config, job_id, provision_timeout))
         _record_nodes_allocated(cluster_name, slurm_cluster, job_id)
         nodes, _ = client.get_job_nodes(job_id)
         # Reset spinner since nodes are now allocated
         rich_utils.force_update_status(
             ux_utils.spinner_message('Launching', cluster_name=cluster_name))
+        # A launch resumed from a park, or retried while its job was queued,
+        # finds the job here before its containers are up.
+        sky_base_dir = _resolve_sky_base_dir(client, provider_config)
+        _wait_for_job_initialized(
+            _make_login_node_runner(provider_config), client, job_id,
+            _ready_signal_path(sky_base_dir, cluster_name_on_cloud),
+            _sbatch_log_path(sky_base_dir, job_id))
         return common.ProvisionRecord(provider_name='slurm',
                                       region=region,
                                       zone=partition,
@@ -1026,7 +1151,7 @@ def _create_virtual_instance(
     if snapshot_manifest is not None:
         _validate_snapshot_files(login_node_runner, snapshot_dir,
                                  snapshot_manifest)
-    ready_signal = f'{sky_cluster_home_dir}/.sky_sbatch_ready'
+    ready_signal = _ready_signal_path(sky_base_dir, cluster_name_on_cloud)
 
     # For non-Docker Hub registries, pyxis/enroot requires '#' separator
     # between registry and path. See:
@@ -1439,8 +1564,9 @@ touch {sky_cluster_home_dir}/.hushlogin
                  f'with {num_nodes} nodes')
     _record_allocation(cluster_name, slurm_cluster, job_id)
 
-    _wait_for_job_nodes(client, job_id, provision_timeout, partition,
-                        on_pending)
+    _wait_for_job_nodes(
+        client, job_id, provision_timeout, partition, on_pending,
+        _park_condition(provider_config, job_id, provision_timeout))
     _record_nodes_allocated(cluster_name, slurm_cluster, job_id)
     nodes, _ = client.get_job_nodes(job_id)
     # Reset spinner since nodes are now allocated
@@ -1472,23 +1598,8 @@ touch {sky_cluster_home_dir}/.hushlogin
         log_thread = threading.Thread(target=_stream_logs, daemon=True)
         log_thread.start()
 
-    try:
-        _wait_for_job_ready(
-            login_node_runner,
-            client,
-            job_id,
-            ready_signal,
-            slurm_log,
-        )
-    except (RuntimeError, exceptions.CommandError) as e:
-        _, stdout, _ = login_node_runner.run(['cat', '--', slurm_log],
-                                             require_outputs=True,
-                                             stream_logs=False)
-        if stdout:
-            logger.error(f'=== Slurm job logs ({slurm_log}) ===\n'
-                         f'{stdout}'
-                         f'=== End of Slurm job logs ===')
-        raise e
+    _wait_for_job_initialized(login_node_runner, client, job_id, ready_signal,
+                              slurm_log)
 
     return common.ProvisionRecord(provider_name='slurm',
                                   region=region,

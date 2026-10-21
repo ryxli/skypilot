@@ -1,6 +1,8 @@
 """Unit tests for sky.provision.slurm.instance."""
+import asyncio
 import json
 import os
+import pickle
 import shlex
 import sqlite3
 import subprocess
@@ -1930,6 +1932,172 @@ class TestWaitForJobNodes:
         with mock.patch.object(instance.time, 'sleep'):
             instance._wait_for_job_nodes(client, '17269', 60, 'dev', on_pending)
         on_pending.assert_called_once_with('PENDING', 'Resources', 2)
+
+
+class TestParkWhileQueued:
+    """A launch waiting in the Slurm queue releases its API server worker."""
+
+    @staticmethod
+    def _queued_client(nodes_after_polls=None):
+        client = mock.MagicMock()
+        client.get_job_state.return_value = 'PENDING'
+        client.get_job_reason.return_value = 'Priority'
+        if nodes_after_polls is None:
+            client.check_job_has_nodes.return_value = False
+        else:
+            client.check_job_has_nodes.side_effect = (
+                [False] * nodes_after_polls + [True])
+        return client
+
+    @staticmethod
+    def _wait(client, in_request, condition):
+        clock = iter(range(0, 1_000_000, 30))  # Every clock read is 30 s on.
+        with mock.patch.object(instance.time, 'time',
+                               side_effect=lambda: next(clock)), \
+                mock.patch.object(instance.time, 'sleep'), \
+                mock.patch.object(instance.common_utils,
+                                  'is_in_request_context',
+                                  return_value=in_request):
+            instance._wait_for_job_nodes(client, '17269', 24 * 3600, 'gpu',
+                                         None, condition)
+
+    def test_a_queued_job_parks_the_request(self):
+        condition = instance.SlurmJobScheduled(provider_config={},
+                                               job_id='17269')
+        with pytest.raises(exceptions.ExecutionPausedError,
+                           match='Priority') as caught:
+            self._wait(self._queued_client(), True, condition)
+        assert caught.value.continue_condition is condition
+
+    @pytest.mark.parametrize('in_request,parkable', [(False, True),
+                                                     (True, False)])
+    def test_waits_in_place_without_a_scheduler_or_condition(
+            self, in_request, parkable):
+        condition = (instance.SlurmJobScheduled(
+            provider_config={}, job_id='17269') if parkable else None)
+        client = self._queued_client(nodes_after_polls=10)
+        self._wait(client, in_request, condition)
+        assert client.check_job_has_nodes.call_count == 11
+
+    @pytest.mark.parametrize('timeout,parks', [(120, False), (24 * 3600, True),
+                                               (-1, True)])
+    def test_only_long_queue_waits_park(self, timeout, parks):
+        """A short timeout probes a partition before failing over."""
+        condition = instance._park_condition({}, '17269', timeout)
+        assert (condition is not None) == parks
+
+    def test_the_condition_survives_the_process_boundary(self):
+        condition = instance.SlurmJobScheduled(
+            provider_config={'ssh': {
+                'hostname': 'login'
+            }}, job_id='17269')
+        assert pickle.loads(pickle.dumps(condition)) == condition
+
+    @staticmethod
+    def _run_condition(states, cancelled=False):
+        client = mock.MagicMock()
+        client.get_job_state.side_effect = states
+        client.get_job_reason.return_value = 'Priority'
+        update_status_msg = mock.AsyncMock()
+
+        async def is_cancelled():
+            return cancelled
+
+        condition = instance.SlurmJobScheduled(provider_config={},
+                                               job_id='17269')
+        with mock.patch.object(instance, '_make_slurm_client',
+                               return_value=client), \
+                mock.patch.object(instance.asyncio, 'sleep',
+                                  new=mock.AsyncMock()):
+            resume = asyncio.run(
+                condition.wait_async(is_cancelled=is_cancelled,
+                                     fallback_wait_seconds=0,
+                                     update_status_msg=update_status_msg))
+        return resume, update_status_msg
+
+    def test_the_condition_resumes_once_slurm_schedules_the_job(self):
+        resume, update_status_msg = self._run_condition(
+            ['PENDING', 'PENDING', 'RUNNING'])
+        assert resume is True
+        update_status_msg.assert_awaited_once_with(
+            'Slurm job 17269 is queued: Priority')
+
+    def test_a_cancelled_launch_is_dropped(self):
+        resume, _ = self._run_condition(['PENDING'], cancelled=True)
+        assert resume is False
+
+
+class TestWaitForJobInitialized:
+    """Container start failures show the sbatch log; some fail for good."""
+
+    @staticmethod
+    def _fail_start(log):
+        runner = mock.MagicMock()
+        runner.run.return_value = (0, log, '')
+        cause = RuntimeError('Slurm job 1 exited (FAILED) before '
+                             'initialization completed.')
+        with mock.patch.object(instance,
+                               '_wait_for_job_ready',
+                               side_effect=cause):
+            instance._wait_for_job_initialized(runner, mock.MagicMock(), '1',
+                                               '/ready', '/slurm-1.out')
+        return cause
+
+    def test_an_image_for_another_architecture_fails_for_good(self):
+        log = ('error: pyxis:     enroot-switchroot: failed to execute: '
+               '/bin/bash: Exec format error\n')
+        with pytest.raises(exceptions.ProvisionUnsupportedError,
+                           match='Exec format error') as caught:
+            self._fail_start(log)
+        assert isinstance(caught.value.__cause__, RuntimeError)
+
+    @pytest.mark.parametrize('log',
+                             ['', 'error: pyxis: couldn\'t start container\n'])
+    def test_other_start_failures_keep_their_error(self, log):
+        with pytest.raises(RuntimeError, match='before initialization'):
+            self._fail_start(log)
+
+
+class TestReattachToQueuedJob:
+    """A resumed launch finds its job and still waits for the containers."""
+
+    def test_waits_for_initialization(self, monkeypatch):
+        client = mock.MagicMock()
+        client.query_jobs.side_effect = [[], ['17269']]
+        client.get_job_nodes.return_value = (['node-0'], ['10.0.0.1'])
+        runner = mock.MagicMock()
+        monkeypatch.setattr(instance, '_make_slurm_client', lambda _: client)
+        monkeypatch.setattr(instance, '_make_login_node_runner',
+                            lambda _: runner)
+        monkeypatch.setattr(instance, '_resolve_sky_base_dir',
+                            lambda *_: '/home/test')
+        monkeypatch.setattr(instance, '_wait_for_job_nodes', mock.MagicMock())
+        monkeypatch.setattr(instance, '_record_allocation', mock.MagicMock())
+        monkeypatch.setattr(instance, '_record_nodes_allocated',
+                            mock.MagicMock())
+        monkeypatch.setattr(instance.slurm_utils, 'get_proctrack_type',
+                            lambda _: 'proctrack/cgroup')
+        monkeypatch.setattr(instance.slurm_utils, 'get_partition_info',
+                            lambda *_: mock.MagicMock())
+        initialized = mock.MagicMock()
+        monkeypatch.setattr(instance, '_wait_for_job_initialized', initialized)
+        config = instance.common.ProvisionConfig(provider_config=dict(
+            _PROVIDER_CONFIG,
+            cluster='hyperpod-slurm',
+            partition='gpu',
+            provision_timeout=-1),
+                                                 authentication_config={},
+                                                 docker_config={},
+                                                 node_config={},
+                                                 count=1,
+                                                 tags={},
+                                                 resume_stopped_nodes=False,
+                                                 ports_to_open_on_launch=None)
+        instance._create_virtual_instance('az', _CLUSTER, _CLUSTER, config)
+        initialized.assert_called_once_with(
+            runner, client, '17269',
+            f'/home/test/.sky_clusters/{_CLUSTER}/.sky_sbatch_ready',
+            '/home/test/.sky_provision/slurm-17269.out')
 
 
 @pytest.mark.parametrize('rows,expected', [
