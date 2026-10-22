@@ -920,6 +920,18 @@ ENV_VAR_SERVER_DB_CONNECTION_POOL_SIZE = (
 ENV_VAR_SERVER_DB_CONNECTION_POOL_MAX_OVERFLOW = (
     f'{SKYPILOT_SERVER_ENV_VAR_PREFIX}DB_CONNECTION_POOL_MAX_OVERFLOW')
 
+# The pool size and burst of each consolidated jobs-controller process, in
+# place of ENV_VAR_SERVER_DB_CONNECTION_POOL_SIZE and _MAX_OVERFLOW, which then
+# size only the API server's own processes. A controller runs up to
+# MAX_JOBS_PER_WORKER jobs whose state queries share one pool, so it usually
+# needs more than a request worker. Unset, a controller uses the server's
+# values.
+ENV_VAR_SERVER_JOBS_CONTROLLER_DB_CONNECTION_POOL_SIZE = (
+    f'{SKYPILOT_SERVER_ENV_VAR_PREFIX}JOBS_CONTROLLER_DB_CONNECTION_POOL_SIZE')
+ENV_VAR_SERVER_JOBS_CONTROLLER_DB_CONNECTION_POOL_MAX_OVERFLOW = (
+    f'{SKYPILOT_SERVER_ENV_VAR_PREFIX}'
+    'JOBS_CONTROLLER_DB_CONNECTION_POOL_MAX_OVERFLOW')
+
 # Explicit sizes for the API server's long and short executor pools and, in
 # consolidation mode, its jobs-controller pool, in place of the counts the
 # server derives from CPU and memory (`sky.server.config.compute_server_config`,
