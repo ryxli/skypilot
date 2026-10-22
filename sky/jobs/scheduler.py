@@ -90,6 +90,13 @@ JOB_CONTROLLER_ENV_PATH = runtime_utils.expanduser('~/.sky/job_controller_env')
 CURRENT_HASH = os.path.expanduser('~/.sky/wheels/current_sky_wheel_hash')
 
 _CONTROLLER_START_INTERVAL_SECONDS = 0.5
+# A controller's synchronous state queries run on asyncio.to_thread's default
+# executor, min(32, CPUs + 4) threads: 20 on a 16-CPU API server, so 8 pooled
+# plus 12 burst never makes a query wait for a connection. 2026-10-22 on
+# bflx-api: 22 controllers idle at 176 backends, peak 440, under the 859 limit;
+# at the API workers' 1 + 1 they timed out on 487 of 661 jobs.
+_CONTROLLER_DB_POOL_SIZE = 8
+_CONTROLLER_DB_POOL_MAX_OVERFLOW = 12
 
 
 def _parse_controller_pid_entry(
@@ -179,7 +186,16 @@ def start_controller() -> None:
     # leaks permanently into the API server's os.environ and causes
     # serve_utils.is_consolidation_mode() to return True for all serve
     # requests, even when serve consolidation mode is not configured.
+    # A controller runs up to MAX_JOBS_PER_WORKER jobs whose state queries share
+    # one process pool, so it gets its own budget instead of the per-process
+    # one meant for API workers. The environment is read when the engine is
+    # built, which happens while the controller imports skypilot_config.
+    db_budget = (f'export {constants.ENV_VAR_SERVER_DB_CONNECTION_POOL_SIZE}='
+                 f'{_CONTROLLER_DB_POOL_SIZE} '
+                 f'{constants.ENV_VAR_SERVER_DB_CONNECTION_POOL_MAX_OVERFLOW}='
+                 f'{_CONTROLLER_DB_POOL_MAX_OVERFLOW}; ')
     run_cmd = (f'export {constants.OVERRIDE_CONSOLIDATION_MODE}=true; '
+               f'{db_budget}'
                f'{activate_python_env_cmd}'
                f'{run_controller_cmd}')
 
