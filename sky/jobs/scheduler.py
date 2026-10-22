@@ -46,6 +46,7 @@ import asyncio
 import contextlib
 import os
 import pathlib
+import shlex
 import shutil
 import signal
 import sys
@@ -90,6 +91,13 @@ JOB_CONTROLLER_ENV_PATH = runtime_utils.expanduser('~/.sky/job_controller_env')
 CURRENT_HASH = os.path.expanduser('~/.sky/wheels/current_sky_wheel_hash')
 
 _CONTROLLER_START_INTERVAL_SECONDS = 0.5
+# Each pair maps a controller's own pool setting to the one its engine reads.
+_CONTROLLER_DB_POOL_ENV_VARS = (
+    (constants.ENV_VAR_SERVER_JOBS_CONTROLLER_DB_CONNECTION_POOL_SIZE,
+     constants.ENV_VAR_SERVER_DB_CONNECTION_POOL_SIZE),
+    (constants.ENV_VAR_SERVER_JOBS_CONTROLLER_DB_CONNECTION_POOL_MAX_OVERFLOW,
+     constants.ENV_VAR_SERVER_DB_CONNECTION_POOL_MAX_OVERFLOW),
+)
 
 
 def _parse_controller_pid_entry(
@@ -179,7 +187,14 @@ def start_controller() -> None:
     # leaks permanently into the API server's os.environ and causes
     # serve_utils.is_consolidation_mode() to return True for all serve
     # requests, even when serve consolidation mode is not configured.
+    # The engine reads the pool size while the controller imports
+    # skypilot_config, so the controller's own budget is exported up front.
+    db_budget = ''.join(
+        f'export {server_var}={shlex.quote(os.environ[controller_var])}; '
+        for controller_var, server_var in _CONTROLLER_DB_POOL_ENV_VARS
+        if controller_var in os.environ)
     run_cmd = (f'export {constants.OVERRIDE_CONSOLIDATION_MODE}=true; '
+               f'{db_budget}'
                f'{activate_python_env_cmd}'
                f'{run_controller_cmd}')
 
