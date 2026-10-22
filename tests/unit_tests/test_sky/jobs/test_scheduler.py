@@ -1,4 +1,5 @@
 """Unit tests for sky.jobs.scheduler controller process management."""
+import os
 import signal
 from unittest import mock
 
@@ -222,3 +223,50 @@ class TestMaybeStartControllersOwnership:
         assert calls.count('start') == 4
         # One check after each of the three sleeps.
         assert still_owned.call_count == 3
+
+
+@pytest.mark.parametrize('controller_env, expected', [
+    ({
+        'SKYPILOT_SERVER_JOBS_CONTROLLER_DB_CONNECTION_POOL_SIZE': '8',
+        'SKYPILOT_SERVER_JOBS_CONTROLLER_DB_CONNECTION_POOL_MAX_OVERFLOW': '12',
+    }, (8, 12)),
+    ({}, (1, 1)),
+])
+def test_controller_db_budget(monkeypatch, tmp_path, controller_env, expected):
+    """A controller uses its own pool budget when set, the server's otherwise."""
+    import subprocess
+    import sys
+
+    from sky.skylet import constants
+
+    commands = []
+    monkeypatch.setattr(scheduler.runtime_utils, 'expanduser',
+                        lambda path: str(tmp_path / path.lstrip('~/')))
+    monkeypatch.setattr(scheduler.subprocess_utils, 'launch_new_process_tree',
+                        lambda cmd, log_output: commands.append(cmd) or 1)
+    monkeypatch.setattr(scheduler.psutil, 'Process', mock.MagicMock())
+    monkeypatch.setattr(scheduler, '_append_controller_pid_record',
+                        lambda *_args: None)
+    for name, value in controller_env.items():
+        monkeypatch.setenv(name, value)
+
+    scheduler.start_controller()
+
+    exports = commands[0].split(constants.ACTIVATE_SKY_REMOTE_PYTHON_ENV)[0]
+    size, overflow = expected
+    probe = ('from sky.utils.db import db_utils; '
+             'size = db_utils.get_db_connection_pool_size(); '
+             f'assert size == {size}, size; '
+             'overflow = db_utils.get_db_connection_pool_max_overflow(size); '
+             f'assert overflow == {overflow}, overflow')
+    # The server's own 1 + 1 budget is in the controller's inherited env.
+    env = {
+        **os.environ,
+        constants.ENV_VAR_SERVER_DB_CONNECTION_POOL_SIZE: '1',
+        constants.ENV_VAR_SERVER_DB_CONNECTION_POOL_MAX_OVERFLOW: '1',
+    }
+    subprocess.run(['bash', '-c', f'{exports} {sys.executable} -c "{probe}"'],
+                   env=env,
+                   capture_output=True,
+                   text=True,
+                   check=True)
