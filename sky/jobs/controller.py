@@ -1604,8 +1604,10 @@ class JobController:
                 if phase == managed_job_runtime.RuntimePhase.NEEDS_REPLACEMENT:
                     job_status = None
                 elif job_status == job_lib.JobStatus.CANCELLED:
-                    logger.info(f'Task {task_id} was cancelled by its runtime. '
-                                'Cleaning up the managed job.')
+                    # A CANCELLED task records no reason; log the runtime's.
+                    reason = runtime_recovery.reason or 'no reason given'
+                    logger.info(f'Task {task_id} was cancelled by its runtime '
+                                f'({reason}). Cleaning up the managed job.')
                     raise asyncio.CancelledError()
                 elif phase != managed_job_runtime.RuntimePhase.TERMINATED:
                     if phase == managed_job_runtime.RuntimePhase.UNAVAILABLE:
