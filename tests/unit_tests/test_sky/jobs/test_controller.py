@@ -3854,8 +3854,12 @@ class TestRunJobLoopTransientDbErrors:
     """asyncio.sleep is patched to record each backoff and advance the fake
     clock that the retry deadline reads."""
 
-    @staticmethod
-    def _db_error() -> sqlalchemy.exc.OperationalError:
+    @pytest.fixture(params=['connection', 'pool'])
+    def db_error(
+            self,
+            request: pytest.FixtureRequest) -> sqlalchemy.exc.SQLAlchemyError:
+        if request.param == 'pool':
+            return sqlalchemy.exc.TimeoutError('QueuePool exhausted')
         return sqlalchemy.exc.OperationalError(
             'SELECT 1', {},
             Exception('server closed the connection unexpectedly'))
@@ -3917,10 +3921,11 @@ class TestRunJobLoopTransientDbErrors:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize('step', ['cleanup', 'finalize'])
-    async def test_transient_db_error_is_retried(self, manager, sleeps, step):
+    async def test_transient_db_error_is_retried(self, manager, sleeps, step,
+                                                 db_error):
         target = (manager._cleanup if step == 'cleanup' else
                   managed_job_state.finalize_job_done_async)
-        target.side_effect = [self._db_error(), self._db_error(), None]
+        target.side_effect = [db_error, db_error, None]
 
         await manager.run_job_loop(1, 'job.log')
 
@@ -3933,9 +3938,9 @@ class TestRunJobLoopTransientDbErrors:
 
     @pytest.mark.asyncio
     async def test_cleanup_error_caused_by_db_error_is_retried(
-            self, manager, sleeps):
+            self, manager, sleeps, db_error):
         wrapped = RuntimeError('Failed to terminate the cluster c.')
-        wrapped.__cause__ = self._db_error()
+        wrapped.__cause__ = db_error
         manager._cleanup.side_effect = [wrapped, None]
 
         await manager.run_job_loop(1, 'job.log')
@@ -3963,8 +3968,8 @@ class TestRunJobLoopTransientDbErrors:
 
     @pytest.mark.asyncio
     async def test_cleanup_db_error_past_budget_fails_job(
-            self, manager, sleeps):
-        manager._cleanup.side_effect = self._db_error()
+            self, manager, sleeps, db_error):
+        manager._cleanup.side_effect = db_error
 
         await manager.run_job_loop(1, 'job.log')
 
@@ -3979,16 +3984,16 @@ class TestRunJobLoopTransientDbErrors:
         managed_job_state.set_failed_async.assert_awaited_once()
         kwargs = managed_job_state.set_failed_async.await_args.kwargs
         assert kwargs['override_terminal'] is True
-        assert 'OperationalError' in kwargs['failure_reason']
+        assert type(db_error).__name__ in kwargs['failure_reason']
         managed_job_state.finalize_job_done_async.assert_awaited_once_with(
             1, cancelling=False, callback_func=None)
 
     @pytest.mark.asyncio
     async def test_cancelled_job_ends_cancelled_after_cleanup_retry(
-            self, manager, sleeps):
+            self, manager, sleeps, db_error):
         controller_module.JobController.return_value.run.side_effect = (
             asyncio.CancelledError())
-        manager._cleanup.side_effect = [self._db_error(), None]
+        manager._cleanup.side_effect = [db_error, None]
 
         with pytest.raises(asyncio.CancelledError):
             await manager.run_job_loop(1, 'job.log')
@@ -3998,6 +4003,86 @@ class TestRunJobLoopTransientDbErrors:
         managed_job_state.set_failed_async.assert_not_awaited()
         managed_job_state.finalize_job_done_async.assert_awaited_once_with(
             1, cancelling=True, callback_func=None)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize('pool', [None, 'test-pool'])
+    @pytest.mark.parametrize('signal_content,graceful,timeout', [
+        ('', False, None),
+        ('graceful:30', True, 30),
+    ])
+    async def test_claimed_pending_cancel_reaches_cleanup(
+            self, manager, monkeypatch, tmp_path, pool, signal_content,
+            graceful, timeout):
+        signal = tmp_path / '1'
+        signal.write_text(signal_content, encoding='utf-8')
+        monkeypatch.setattr(jobs_constants, 'CONSOLIDATED_SIGNAL_PATH',
+                            str(tmp_path))
+        monkeypatch.setattr(jobs_constants, 'JOBS_CONTROLLER_LOGS_DIR',
+                            str(tmp_path / 'logs'))
+        monkeypatch.setattr(controller_module.metrics_lib, 'METRICS_ENABLED',
+                            False)
+        monkeypatch.setattr(controller_module.controller_utils,
+                            'get_number_of_jobs_controllers', lambda: 1)
+        monkeypatch.setattr(
+            managed_job_state, 'get_waiting_job_async',
+            AsyncMock(side_effect=[{
+                'job_id': 1,
+                'pool': pool,
+            }, asyncio.CancelledError()]))
+        monkeypatch.setattr(
+            managed_job_state, 'get_status_async',
+            AsyncMock(return_value=managed_job_state.ManagedJobStatus.PENDING))
+        monkeypatch.setattr(
+            managed_job_state, 'get_all_task_ids_statuses_async',
+            AsyncMock(
+                return_value=[(0, managed_job_state.ManagedJobStatus.PENDING)]))
+        running = asyncio.Event()
+        background = []
+
+        async def run():
+            running.set()
+            await asyncio.Future()
+
+        async def schedule(coro):
+            task = asyncio.create_task(coro)
+            background.append(task)
+            return task
+
+        controller_module.JobController.return_value.run.side_effect = run
+        monkeypatch.setattr(controller_module, 'create_background_task',
+                            schedule)
+        try:
+            with pytest.raises(asyncio.CancelledError):
+                await manager.monitor_loop()
+            assert signal.exists()
+            assert len(background) == 1
+            await asyncio.wait_for(running.wait(), timeout=5)
+            with patch.object(
+                    asyncio,
+                    'sleep',
+                    new=AsyncMock(side_effect=asyncio.CancelledError())):
+                with pytest.raises(asyncio.CancelledError):
+                    await manager.cancel_job()
+            with pytest.raises(asyncio.CancelledError):
+                await background[0]
+        finally:
+            for task in background:
+                task.cancel()
+            await asyncio.gather(*background, return_exceptions=True)
+
+        assert not signal.exists()
+        manager._cleanup.assert_awaited_once()
+        cleanup = manager._cleanup.await_args
+        assert cleanup.args == (1,)
+        assert cleanup.kwargs['pool'] == pool
+        assert cleanup.kwargs['graceful'] is graceful
+        assert cleanup.kwargs['graceful_timeout'] == timeout
+        managed_job_state.set_cancelling_async.assert_awaited_once()
+        managed_job_state.set_failed_async.assert_not_awaited()
+        managed_job_state.finalize_job_done_async.assert_awaited_once_with(
+            1, cancelling=True, callback_func=None)
+        assert 1 not in manager.job_tasks
+        assert 1 not in manager.starting
 
 
 class TestCancelDynamicMembers:
