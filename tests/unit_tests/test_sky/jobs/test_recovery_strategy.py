@@ -694,12 +694,13 @@ async def test_start_wait_uses_runtime_before_cluster_refresh(
     from sky.skylet import job_lib
     executor = _make_bare_executor()
     executor.cluster_name = 'test-cluster'
+    executor.job_id_on_pool_cluster = None
     runtime = recovery_strategy.managed_job_runtime
     monkeypatch.setattr(runtime, 'is_registered', lambda: True)
     monkeypatch.setattr(recovery_strategy.global_user_state,
                         'get_handle_from_cluster_name', lambda _: object())
     monkeypatch.setattr(
-        runtime, 'get_job_status', lambda *_:
+        runtime, 'get_job_status', lambda *_, job_id:
         (getattr(job_lib.JobStatus, status_name), None))
     monkeypatch.setattr(runtime, 'get_job_submitted_at', lambda *_: 123.45)
     refresh = mock.Mock(side_effect=AssertionError('must retain allocation'))

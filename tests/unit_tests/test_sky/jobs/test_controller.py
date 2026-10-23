@@ -2003,6 +2003,40 @@ class TestUserJobStatusClassification:
         assert 'Job failed (FAILED) (user program failure)' in failure_reason
         assert 'sky jobs logs --controller' in failure_reason
 
+    @pytest.mark.asyncio
+    async def test_terminal_failure_reason_from_runtime(self):
+        """A runtime that observed how the job ended explains the failure,
+        e.g. a scheduler time limit, instead of blaming the user program."""
+
+        controller = self._make_controller()
+        runtime = controller_module.managed_job_runtime
+        observation = runtime.RuntimeObservation(
+            runtime_id='slurm:1',
+            restart_count=0,
+            job_status=job_lib.JobStatus.FAILED,
+            reason='Slurm job 1 ended TIMEOUT')
+        with patch.object(runtime, 'is_registered', return_value=True), \
+             patch.object(runtime, 'observes_recovery', return_value=True), \
+             patch.object(runtime, 'get_recovery_status',
+                          return_value=observation), \
+             patch.object(controller_module.global_user_state,
+                          'get_handle_from_cluster_name',
+                          return_value=MagicMock()), \
+             patch.object(managed_job_state, 'get_runtime_cursor_async',
+                          new=AsyncMock(return_value=None)), \
+             patch.object(managed_job_state, 'observe_runtime_async',
+                          new=AsyncMock(return_value=None)), \
+             patch.object(managed_job_state,
+                          'get_runtime_user_restarts_async',
+                          new=AsyncMock(return_value=0)):
+            mock_set_failed = await self._run_until_terminal(
+                controller, job_lib.JobStatus.FAILED)
+
+        failure_reason = mock_set_failed.call_args.kwargs['failure_reason']
+        assert failure_reason.startswith('Slurm job 1 ended TIMEOUT. ')
+        assert 'user program failure' not in failure_reason
+        assert 'sky jobs logs --controller' in failure_reason
+
 
 class TestUserJobFailureRecoveryEventReason:
     """The RECOVERING job event must state the real trigger.
@@ -2854,6 +2888,64 @@ class TestRuntimeCursorReads:
         assert [call.kwargs['previous'] for call in dispatch.call_args_list
                ] == [cursor_a, cursor_b, cursor_b, cursor_b]
         ordinary_probe.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_two_node_runtime_running_then_terminal_skips_status_probes(
+            self):
+        """Runtime-owned observations bypass both probes until termination."""
+        runtime = controller_module.managed_job_runtime
+        running = runtime.RuntimeObservation(
+            runtime_id='allocation',
+            restart_count=0,
+            job_status=job_lib.JobStatus.RUNNING)
+        succeeded = runtime.RuntimeObservation(
+            runtime_id='allocation',
+            restart_count=0,
+            job_status=job_lib.JobStatus.SUCCEEDED)
+        cursor = runtime.RuntimeCursor('allocation')
+        instance = self._instance()
+        task = MagicMock()
+        task.num_nodes = 2
+        with patch.object(controller_module.backend_utils,
+                          'async_check_network_connection',
+                          new=AsyncMock()), \
+             patch.object(controller_module.global_user_state,
+                          'get_handle_from_cluster_name',
+                          return_value=MagicMock()), \
+             patch.object(runtime, 'is_registered', return_value=True), \
+             patch.object(runtime, 'observes_recovery', return_value=True), \
+             patch.object(managed_job_state, 'get_runtime_cursor_async',
+                          new=AsyncMock(return_value=cursor)), \
+             patch.object(runtime, 'get_recovery_status',
+                          side_effect=[running, succeeded]), \
+             patch.object(managed_job_state, 'observe_runtime_async',
+                          new=AsyncMock(return_value=cursor)), \
+             patch.object(managed_job_utils, 'get_job_status',
+                          new=AsyncMock()) as ordinary_probe, \
+             patch.object(controller_module.backend_utils,
+                          'refresh_cluster_status_handle') as cluster_probe, \
+             patch.object(managed_job_utils, 'try_to_get_job_end_time',
+                          return_value=1234.0), \
+             patch.object(managed_job_state, 'set_succeeded_async',
+                          new=AsyncMock()) as set_succeeded, \
+             patch.object(controller_module.backend_utils, 'get_clusters',
+                          return_value=[]), \
+             patch.object(controller_module.asyncio, 'sleep',
+                          new=AsyncMock()):
+            result = await JobController._monitor_one_task_impl(
+                instance,
+                task_id=0,
+                task=task,
+                cluster_name='cluster',
+                executor=MagicMock(),
+                status_logger=managed_job_utils.JobStatusLogger(),
+                callback_func=AsyncMock())
+
+        assert result is True
+        ordinary_probe.assert_not_awaited()
+        cluster_probe.assert_not_called()
+        set_succeeded.assert_awaited_once()
+        instance._cleanup_cluster.assert_awaited_once_with('cluster')
 
     @pytest.mark.asyncio
     async def test_cursor_read_again_when_no_cursor_comes_back(self):
