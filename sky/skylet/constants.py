@@ -334,8 +334,12 @@ CONDA_INSTALLATION_COMMANDS = (
 UV_INSTALLATION_COMMANDS = (
     # Install uv for venv management and pip installation.
     f'{SKY_UV_INSTALL_CMD};'
-    # Create a separate python environment for SkyPilot dependencies.
-    f'[ -d {SKY_REMOTE_PYTHON_ENV} ] || '
+    # Create a separate python environment for SkyPilot dependencies. Check the
+    # interpreter, not the directory: a node-local venv can outlive the
+    # interpreter it links to (e.g. a Slurm allocation reusing a node whose
+    # previous teardown removed the per-cluster home).
+    f'[ -x {SKY_REMOTE_PYTHON_ENV}/bin/python ] || '
+    f'{{ rm -rf {SKY_REMOTE_PYTHON_ENV} && '
     # Do NOT use --system-site-packages here, because if users upgrade any
     # packages in the base env, they interfere with skypilot dependencies.
     # Reference: https://github.com/skypilot-org/skypilot/issues/4097
@@ -348,7 +352,7 @@ UV_INSTALLATION_COMMANDS = (
     # uv to use the python version specified in the `.python_version` file.
     # TODO(zhwu): consider adding --python-preference only-managed to avoid
     # using the system python, if a user report such issue.
-    f'{SKY_UV_CMD} venv --seed {SKY_REMOTE_PYTHON_ENV} --python 3.10;'
+    f'{SKY_UV_CMD} venv --seed {SKY_REMOTE_PYTHON_ENV} --python 3.10; }};'
     f'echo "$(echo {SKY_REMOTE_PYTHON_ENV})/bin/python" > {SKY_PYTHON_PATH_FILE};'  # pylint: disable=line-too-long
 )
 
