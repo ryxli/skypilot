@@ -1909,24 +1909,11 @@ srun() {{
             ports_to_open_on_launch=None,
         )
 
-    @patch('sky.provision.slurm.instance._wait_for_job_nodes')
-    @patch('sky.provision.slurm.instance.slurm_utils.get_proctrack_type')
-    @patch('sky.provision.slurm.instance.slurm_utils.get_partition_info')
-    @patch('sky.provision.slurm.instance.slurm.SlurmClient')
-    @patch('sky.provision.slurm.instance.command_runner.'
-           'SlurmLoginNodeCommandRunner')
-    def test_container_script_format(self, mock_ssh_runner, mock_slurm_client,
-                                     mock_get_partition_info,
-                                     mock_get_proctrack_type,
-                                     mock_wait_for_job_nodes):
-        """Test that sbatch provision script for containers is correct."""
+    @staticmethod
+    def _make_container_config():
         from sky.provision import common
 
-        self._setup_mocks(mock_ssh_runner, mock_slurm_client,
-                          mock_get_partition_info, 'gpu')
-        mock_get_proctrack_type.return_value = 'cgroup'
-
-        config = common.ProvisionConfig(
+        return common.ProvisionConfig(
             provider_config={
                 'ssh': {
                     'hostname': 'login.example.com',
@@ -1954,8 +1941,81 @@ srun() {{
             ports_to_open_on_launch=None,
         )
 
+    @patch('sky.provision.slurm.instance._wait_for_job_nodes')
+    @patch('sky.provision.slurm.instance.slurm_utils.get_proctrack_type')
+    @patch('sky.provision.slurm.instance.slurm_utils.get_partition_info')
+    @patch('sky.provision.slurm.instance.slurm.SlurmClient')
+    @patch('sky.provision.slurm.instance.command_runner.'
+           'SlurmLoginNodeCommandRunner')
+    def test_container_script_format(self, mock_ssh_runner, mock_slurm_client,
+                                     mock_get_partition_info,
+                                     mock_get_proctrack_type,
+                                     mock_wait_for_job_nodes):
+        """Test that sbatch provision script for containers is correct."""
+        self._setup_mocks(mock_ssh_runner, mock_slurm_client,
+                          mock_get_partition_info, 'gpu')
+        mock_get_proctrack_type.return_value = 'cgroup'
+        config = self._make_container_config()
+
         written_script = self._run_and_capture_script('test-cluster', config)
         assert_sbatch_matches_snapshot('containers', written_script)
+
+    @pytest.mark.parametrize('installed_packages, expected_apt_calls', [
+        ('ca-certificates rsync curl git wget fuse', []),
+        ('ca-certificates curl fuse', ['update', 'install -y rsync git wget']),
+    ])
+    @patch('sky.provision.slurm.instance._wait_for_job_nodes')
+    @patch('sky.provision.slurm.instance.slurm_utils.get_proctrack_type')
+    @patch('sky.provision.slurm.instance.slurm_utils.get_partition_info')
+    @patch('sky.provision.slurm.instance.slurm.SlurmClient')
+    @patch('sky.provision.slurm.instance.command_runner.'
+           'SlurmLoginNodeCommandRunner')
+    def test_container_init_installs_only_missing_packages(
+            self, mock_ssh_runner, mock_slurm_client, mock_get_partition_info,
+            mock_get_proctrack_type, mock_wait_for_job_nodes, tmp_path,
+            installed_packages, expected_apt_calls):
+        """Container init skips apt or installs precisely missing packages."""
+        del mock_wait_for_job_nodes
+        self._setup_mocks(mock_ssh_runner, mock_slurm_client,
+                          mock_get_partition_info, 'gpu')
+        mock_get_proctrack_type.return_value = 'cgroup'
+        script = self._run_and_capture_script('test-cluster',
+                                              self._make_container_config())
+        match = re.search(
+            r'(?ms)^missing=""\nfor package in ca-certificates rsync curl git '
+            r'wget fuse; do\n.*?^fi$', script)
+        assert match is not None
+
+        fake_bin = tmp_path / 'bin'
+        fake_bin.mkdir()
+        apt_log = tmp_path / 'apt.log'
+        (fake_bin / 'dpkg').write_text('#!/bin/bash\n'
+                                       'case " $INSTALLED_PACKAGES " in\n'
+                                       '  *" $2 "*) exit 0 ;;\n'
+                                       '  *) exit 1 ;;\n'
+                                       'esac\n')
+        (fake_bin / 'apt-get').write_text('#!/bin/bash\n'
+                                          'printf "%s\\n" "$*" >> "$APT_LOG"\n')
+        for command in fake_bin.iterdir():
+            os.chmod(command, 0o755)
+
+        result = subprocess.run(
+            ['bash', '-c', match.group()],
+            env={
+                **os.environ,
+                'APT_LOG': str(apt_log),
+                'INSTALLED_PACKAGES': installed_packages,
+                'PATH': f'{fake_bin}:{os.environ["PATH"]}',
+            },
+            capture_output=True,
+            text=True,
+            check=False)
+
+        assert result.returncode == 0, result.stderr
+        if not expected_apt_calls:
+            assert not apt_log.exists()
+        else:
+            assert apt_log.read_text().splitlines() == expected_apt_calls
 
     @patch('sky.provision.slurm.instance._wait_for_job_nodes')
     @patch('sky.provision.slurm.instance.slurm_utils.get_proctrack_type')
