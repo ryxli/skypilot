@@ -559,12 +559,7 @@ def cancel_orphaned_allocations() -> None:
             continue
         try:
             client = _make_slurm_client(provider_config)
-            command = f'scancel -- {allocation["job_id"]}'
-            rc, _, stderr = client.run_command(
-                command, timeout=_ORPHAN_ALLOCATION_SQUEUE_TIMEOUT_SECONDS)
-            subprocess_utils.handle_returncode(
-                rc, command, 'Failed to cancel orphaned Slurm allocation.',
-                stderr)
+            client.cancel_job(allocation['job_id'])
             logger.warning('Cancelled orphaned Slurm allocation: '
                            f'cluster={allocation["cluster_name"]}, '
                            f'slurm_cluster={slurm_cluster}, '

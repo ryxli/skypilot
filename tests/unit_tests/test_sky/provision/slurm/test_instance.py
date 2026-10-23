@@ -1910,7 +1910,6 @@ class TestCancelOrphanedAllocations:  # pylint: disable=protected-access
         client.run_command.side_effect = [
             (0, '17269|test-cluster\n', ''),
             (0, '17269|test-cluster\n', ''),
-            (0, '', ''),
         ]
         provider_config = self._provider_config()
         with mock.patch.object(
@@ -1933,8 +1932,8 @@ class TestCancelOrphanedAllocations:  # pylint: disable=protected-access
                                 return_value=client):
             instance.cancel_orphaned_allocations()
             instance.cancel_orphaned_allocations()
-        assert client.run_command.call_count == 3
-        assert 'scancel -- 17269' in client.run_command.call_args.args[0]
+        assert client.run_command.call_count == 2
+        client.cancel_job.assert_called_once_with('17269')
 
     def test_current_allocation_is_never_cancelled(self):
         event = self._event()
@@ -1956,8 +1955,7 @@ class TestCancelOrphanedAllocations:  # pylint: disable=protected-access
                             return_value=client):
             instance.cancel_orphaned_allocations()
             instance.cancel_orphaned_allocations()
-        assert all('scancel' not in call.args[0]
-                   for call in client.run_command.call_args_list)
+        client.cancel_job.assert_not_called()
 
     def test_replaced_allocation_is_cancelled(self):
         event = self._event()
@@ -1966,7 +1964,6 @@ class TestCancelOrphanedAllocations:  # pylint: disable=protected-access
         client.run_command.side_effect = [
             (0, '17269|test-cluster\n', ''),
             (0, '17269|test-cluster\n', ''),
-            (0, '', ''),
         ]
         provider_config = self._provider_config()
         with mock.patch.object(
@@ -1989,7 +1986,7 @@ class TestCancelOrphanedAllocations:  # pylint: disable=protected-access
                                 return_value=client):
             instance.cancel_orphaned_allocations()
             instance.cancel_orphaned_allocations()
-        assert 'scancel -- 17269' in client.run_command.call_args.args[0]
+        client.cancel_job.assert_called_once_with('17269')
 
     # None: a first launch. 17260: a relaunch, whose record keeps the previous
     # allocation's cluster info until the new one is ready.
@@ -2015,8 +2012,7 @@ class TestCancelOrphanedAllocations:  # pylint: disable=protected-access
                             return_value=client):
             instance.cancel_orphaned_allocations()
             instance.cancel_orphaned_allocations()
-        assert all('scancel' not in call.args[0]
-                   for call in client.run_command.call_args_list)
+        client.cancel_job.assert_not_called()
 
     def test_squeue_failure_cancels_nothing(self):
         event = self._event()
@@ -2037,8 +2033,7 @@ class TestCancelOrphanedAllocations:  # pylint: disable=protected-access
                             return_value=client):
             instance.cancel_orphaned_allocations()
             instance.cancel_orphaned_allocations()
-        assert not any('scancel' in call.args[0]
-                       for call in client.run_command.call_args_list)
+        client.cancel_job.assert_not_called()
 
     def test_db_failure_propagates_to_event_boundary(self):
         with mock.patch.object(instance.global_user_state,
@@ -2067,8 +2062,7 @@ class TestCancelOrphanedAllocations:  # pylint: disable=protected-access
                             return_value=client):
             instance.cancel_orphaned_allocations()
             instance.cancel_orphaned_allocations()
-        assert not any('scancel' in call.args[0]
-                       for call in client.run_command.call_args_list)
+        client.cancel_job.assert_not_called()
 
     def test_missing_yaml_warns_once_without_cancelling(self, caplog):
         event = self._event()
@@ -2099,8 +2093,7 @@ class TestCancelOrphanedAllocations:  # pylint: disable=protected-access
             if 'Cannot cancel orphaned Slurm allocation' in record.message
         ]
         assert len(warnings) == 1
-        assert not any('scancel' in call.args[0]
-                       for call in client.run_command.call_args_list)
+        client.cancel_job.assert_not_called()
 
     def test_scancel_failure_is_retried_on_next_pass(self, caplog):
         event = self._event()
@@ -2108,9 +2101,11 @@ class TestCancelOrphanedAllocations:  # pylint: disable=protected-access
         client.run_command.side_effect = [
             (0, '17269|test-cluster\n', ''),
             (0, '17269|test-cluster\n', ''),
-            (1, '', 'scancel down'),
             (0, '17269|test-cluster\n', ''),
-            (0, '', ''),
+        ]
+        client.cancel_job.side_effect = [
+            exceptions.CommandError(1, 'scancel 17269', 'scancel down',
+                                    'scancel down'), None
         ]
         provider_config = self._provider_config()
         with mock.patch.object(
@@ -2134,11 +2129,10 @@ class TestCancelOrphanedAllocations:  # pylint: disable=protected-access
             instance.cancel_orphaned_allocations()
             instance.cancel_orphaned_allocations()
             instance.cancel_orphaned_allocations()
-        scancels = [
-            call for call in client.run_command.call_args_list
-            if 'scancel' in call.args[0]
+        assert client.cancel_job.call_args_list == [
+            mock.call('17269'),
+            mock.call('17269'),
         ]
-        assert len(scancels) == 2
         assert any(
             'Failed to cancel orphaned Slurm allocation' in record.message
             for record in caplog.records)
@@ -2176,8 +2170,7 @@ class TestCancelOrphanedAllocations:  # pylint: disable=protected-access
                                                            return_value=client):
             instance.cancel_orphaned_allocations()
             instance.cancel_orphaned_allocations()
-        assert not any('scancel' in call.args[0]
-                       for call in client.run_command.call_args_list)
+        client.cancel_job.assert_not_called()
 
 
 class TestRecordAllocation:
