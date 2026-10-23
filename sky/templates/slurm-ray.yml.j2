@@ -103,9 +103,7 @@ setup_commands:
     {%- for initial_setup_command in initial_setup_commands %}
     {{ initial_setup_command }}
     {%- endfor %}
-{%- if not is_launched_by_jobs_controller %}
     # SSH setup: authorized_keys, host key, and bashrc for interactive sessions.
-    # Managed-job clusters take no SSH sessions, so they skip it.
     # - Non-container: always run (for the normal user)
     # - Container: only run inside container (when root), not on the host
     if [ {{ 'true' if not has_image else 'false' }} ] || [ "$(id -u)" = "0" ]; then
@@ -131,13 +129,12 @@ setup_commands:
     SKYPILOT_SSH_RC
     grep -q "source ~/.sky_ssh_rc" ~{{user}}/.bashrc 2>/dev/null || (echo "" >> ~{{user}}/.bashrc && echo "source ~/.sky_ssh_rc" >> ~{{user}}/.bashrc)
     fi
-{%- endif %}
     {{ setup_sky_dirs_commands }}
     {{ conda_installation_commands }}
     {{ uv_installation_commands }}
     {{ skypilot_wheel_installation_commands }}
     {{ copy_skypilot_templates_commands }}
-{% if image_id is not none and not is_launched_by_jobs_controller %}
+{% if image_id is not none %}
     # Install dropbear and socat for container SSH.
     # OpenSSH fails in enroot containers created with --container-remap-root with:
     #   "permanently_set_uid: was able to restore old [e]gid [preauth]"

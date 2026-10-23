@@ -420,17 +420,23 @@ class TestSubmitUserDeployVariables:
 
 class TestSubmitUserTemplate:
 
-    @staticmethod
-    def _render(tmp_path, **overrides):
+    @pytest.mark.parametrize(
+        'slurm_user,transport_user,image_id,expected_ssh_user', [
+            ('alice', 'root', None, 'alice'),
+            ('alice', 'root', 'ubuntu:22.04', 'root'),
+            (None, 'ubuntu', None, 'ubuntu'),
+        ])
+    def test_persists_submit_user(self, tmp_path, slurm_user, transport_user,
+                                  image_id, expected_ssh_user):
         from sky.utils import common_utils
         from sky.utils import yaml_utils
 
         output_path = tmp_path / 'cluster.yaml'
         common_utils.fill_template(
             'slurm-ray.yml.j2', {
-                'slurm_user': 'alice',
-                'ssh_user': 'root',
-                'image_id': None,
+                'slurm_user': slurm_user,
+                'ssh_user': transport_user,
+                'image_id': image_id,
                 'cluster_name_on_cloud': 'test-cluster',
                 'num_nodes': 1,
                 'slurm_cluster': 'my-cluster',
@@ -477,23 +483,9 @@ class TestSubmitUserTemplate:
                 'uv_installation_commands': '',
                 'skypilot_wheel_installation_commands': '',
                 'copy_skypilot_templates_commands': '',
-                **overrides,
             }, str(output_path))
-        return yaml_utils.read_yaml(str(output_path))
 
-    @pytest.mark.parametrize(
-        'slurm_user,transport_user,image_id,expected_ssh_user', [
-            ('alice', 'root', None, 'alice'),
-            ('alice', 'root', 'ubuntu:22.04', 'root'),
-            (None, 'ubuntu', None, 'ubuntu'),
-        ])
-    def test_persists_submit_user(self, tmp_path, slurm_user, transport_user,
-                                  image_id, expected_ssh_user):
-        config = self._render(tmp_path,
-                              slurm_user=slurm_user,
-                              ssh_user=transport_user,
-                              image_id=image_id)
-
+        config = yaml_utils.read_yaml(str(output_path))
         if slurm_user is None:
             assert 'slurm_user' not in config['provider']
         else:
@@ -508,21 +500,6 @@ class TestSubmitUserTemplate:
         assert config['auth']['ssh_user'] == expected_ssh_user
         assert config['available_node_types']['ray_head_default'][
             'node_config']['volume_mounts'][0]['path'] == '/data'
-
-    @pytest.mark.parametrize('is_launched_by_jobs_controller', [False, True])
-    def test_ssh_setup_only_for_ssh_reachable_clusters(
-            self, tmp_path, is_launched_by_jobs_controller):
-        config = self._render(
-            tmp_path,
-            image_id='ubuntu:22.04',
-            initial_setup_commands=['echo initial'],
-            setup_sky_dirs_commands='echo dirs',
-            is_launched_by_jobs_controller=is_launched_by_jobs_controller)
-
-        setup = config['setup_commands'][0]
-        assert 'echo initial' in setup and 'echo dirs' in setup
-        assert ('authorized_keys' in setup) != is_launched_by_jobs_controller
-        assert ('dropbear' in setup) != is_launched_by_jobs_controller
 
 
 class TestCheckInstanceFits:

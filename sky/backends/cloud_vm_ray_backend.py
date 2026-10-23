@@ -1159,11 +1159,7 @@ class RetryingVmProvisioner(object):
                         keep_launch_fields_in_existing_config=cluster_exists,
                         volume_mounts=volume_mounts,
                         cloud_specific_failover_overrides=failover_overrides,
-                        extra_template_variables={
-                            **(extra_vars or {}),
-                            'is_launched_by_jobs_controller':
-                                self._is_launched_by_jobs_controller,
-                        },
+                        extra_template_variables=extra_vars,
                     )
                 except exceptions.ResourcesUnavailableError as e:
                     # Failed due to catalog issue, e.g. image not found, or
