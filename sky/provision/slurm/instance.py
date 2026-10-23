@@ -1357,11 +1357,12 @@ exit 1
         f'{skypilot_runtime_dir}/{skylet_constants.SKYLET_START_FILE}')
     # A spec written in the container inherits HOME=/root.
     # The keeper restores the host HOME before running it.
+    # The launch waits for this poll to start skylet, so keep it short.
     keeper_loop = (f'while true; do '
                    f'if [ -f {keeper_start_file} ]; then '
                    f'HOME={sky_cluster_home_dir} bash {keeper_start_file}; '
                    f'fi; '
-                   f'sleep 5; done')
+                   f'sleep 1; done')
     skylet_keeper_block = (
         f'( while true; do '
         f'SKY_HEAD_NODE=$(scontrol show hostnames '
