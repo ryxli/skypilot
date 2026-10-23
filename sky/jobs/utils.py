@@ -1099,6 +1099,43 @@ def update_managed_jobs_statuses(job_id: Optional[int] = None):
         scheduler.job_done(job_id, idempotent=True)
 
 
+def terminate_leaked_job_clusters() -> None:
+    """Tear down the clusters that finished managed jobs left behind.
+
+    A job whose cluster cleanup failed, for example while its controller could
+    not reach the database, is marked done with the cluster still up, and
+    nothing retries the teardown. Each managed cluster is named after its job,
+    so find the ones whose job is done and tear them down.
+    """
+    managed_clusters = (
+        set(global_user_state.get_cluster_names()) -
+        set(global_user_state.get_cluster_names(exclude_managed_clusters=True)))
+    for cluster_name in sorted(managed_clusters):
+        match = re.fullmatch(r'.+-(\d+)', cluster_name)
+        if match is None:
+            continue
+        job_id = int(match.group(1))
+        tasks = managed_job_state.get_managed_job_tasks(job_id)
+        if not any(
+                task.get('pool') is None and generate_managed_job_cluster_name(
+                    task['job_name'], job_id) == cluster_name
+                for task in tasks):
+            # Not a job's own cluster, e.g. a pool worker.
+            continue
+        if (tasks[0]['schedule_state'] !=
+                managed_job_state.ManagedJobScheduleState.DONE or
+                not all(task['status'].is_terminal() for task in tasks)):
+            continue
+        logger.info(f'Managed job {job_id} is done but its cluster '
+                    f'{cluster_name} still exists. Terminating it.')
+        try:
+            terminate_cluster(cluster_name)
+        except Exception as e:  # pylint: disable=broad-except
+            # The next sweep retries it.
+            logger.warning(f'Failed to terminate cluster {cluster_name}: '
+                           f'{common_utils.format_exception(e)}')
+
+
 def get_job_timestamp(backend: 'backends.CloudVmRayBackend', cluster_name: str,
                       job_id: Optional[int], get_end_time: bool) -> float:
     """Get the submitted/ended time of the job."""
