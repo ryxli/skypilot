@@ -227,6 +227,12 @@ class TestManagedJobEventDaemonPath:
                 events.managed_job_utils,
                 'update_managed_jobs_statuses') as update_mock, \
                 mock.patch.object(
+                    events.managed_job_utils,
+                    'terminate_leaked_job_clusters') as leaked_mock, \
+                mock.patch(
+                    'sky.provision.slurm.instance.cancel_orphaned_allocations'
+                ) as reconcile_mock, \
+                mock.patch.object(
                     events.scheduler,
                     'maybe_start_controllers') as start_mock, \
                 mock.patch.object(
@@ -236,6 +242,8 @@ class TestManagedJobEventDaemonPath:
             event._run()  # pylint: disable=protected-access
 
         update_mock.assert_called_once()
+        leaked_mock.assert_called_once()
+        reconcile_mock.assert_called_once()
         start_mock.assert_called_once()
         # from_scheduler must be absent (defaults to False) or explicitly
         # falsy -- the daemon path must never claim to be the in-request
