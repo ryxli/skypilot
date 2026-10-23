@@ -1193,8 +1193,15 @@ def _create_virtual_instance(
 set -e
 echo "[container-init] Starting..."
 INIT_START=$SECONDS
-apt-get update
-apt-get install -y ca-certificates rsync curl git wget fuse
+# An image that already has the packages skips apt, about 12s per start.
+missing=""
+for package in ca-certificates rsync curl git wget fuse; do
+  dpkg -s "$package" >/dev/null 2>&1 || missing="$missing $package"
+done
+if [ -n "$missing" ]; then
+  apt-get update
+  apt-get install -y $missing
+fi
 echo 'alias sudo=""' >> ~/.bashrc
 echo "[container-init] Packages installed in $((SECONDS - INIT_START))s"
 """
