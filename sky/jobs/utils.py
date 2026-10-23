@@ -773,7 +773,9 @@ async def get_job_status(
 
     if not runtime_checked and managed_job_runtime.is_registered():
         result = await asyncio.to_thread(managed_job_runtime.get_job_status,
-                                         handle, cluster_name)
+                                         handle,
+                                         cluster_name,
+                                         job_id=job_id)
         if result is not None:
             status, _ = result
             _log_job_status(status)
@@ -2980,7 +2982,10 @@ def _stream_logs_by_id(job_id: int, follow: bool, tail: Optional[int],
                 assert cluster_name is not None, (job_id, task_id)
                 if managed_job_runtime.is_registered():
                     runtime_result = managed_job_runtime.get_job_status(
-                        handle, cluster_name, returncode=returncode)
+                        handle,
+                        cluster_name,
+                        returncode=returncode,
+                        job_id=job_id_to_tail)
                     if runtime_result is not None:
                         job_status, _ = runtime_result
                 if job_status is None:

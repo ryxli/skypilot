@@ -168,8 +168,12 @@ class ManagedJobRuntime(Protocol):
         handle: Optional['cloud_vm_ray_backend.CloudVmRayResourceHandle'],
         cluster_name: str,
         returncode: Optional[int] = None,
+        job_id: Optional[int] = None,
     ) -> Optional[Tuple[Optional['job_lib.JobStatus'], Optional[str]]]:
-        """Query job status from the underlying runtime."""
+        """Query job status from the underlying runtime.
+
+        job_id is the job's id on the cluster, None for the cluster's latest
+        job as in backend.get_job_status."""
         ...
 
     def get_recovery_status(
@@ -416,11 +420,15 @@ def get_job_status(
     handle: Optional['cloud_vm_ray_backend.CloudVmRayResourceHandle'],
     cluster_name: str,
     returncode: Optional[int] = None,
+    job_id: Optional[int] = None,
 ) -> Optional[Tuple[Optional['job_lib.JobStatus'], Optional[str]]]:
     if not _is_runtime_candidate(handle):
         return None
     for r in _claimants(handle):
-        result = r.get_job_status(handle, cluster_name, returncode=returncode)
+        result = r.get_job_status(handle,
+                                  cluster_name,
+                                  returncode=returncode,
+                                  job_id=job_id)
         if result is not None:
             return result
     return None

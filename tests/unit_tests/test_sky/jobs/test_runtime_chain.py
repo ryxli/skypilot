@@ -242,6 +242,18 @@ class TestDispatchClaiming:
         rt_a.get_job_status.assert_called_once()
         rt_b.get_job_status.assert_called_once()
 
+    def test_job_id_on_cluster_reaches_the_claimant(self):
+        rt = _make_runtime('only', owns_return=True, hook_return=('A', None))
+        runtime_chain.register(rt)
+        handle = _make_handle(has_ray=False)
+
+        runtime_chain.get_job_status(handle, 'cluster', job_id=3)
+
+        rt.get_job_status.assert_called_once_with(handle,
+                                                  'cluster',
+                                                  returncode=None,
+                                                  job_id=3)
+
 
 def _make_owns_less_runtime(name, hook_return=None):
     """Build a pre-chain runtime: no ``owns()`` attribute at all."""

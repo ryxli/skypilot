@@ -584,8 +584,10 @@ class StrategyExecutor:
                         global_user_state.get_handle_from_cluster_name,
                         self.cluster_name)
                     runtime_status = await asyncio.to_thread(
-                        managed_job_runtime.get_job_status, handle,
-                        self.cluster_name)
+                        managed_job_runtime.get_job_status,
+                        handle,
+                        self.cluster_name,
+                        job_id=self.job_id_on_pool_cluster)
             except Exception as e:  # pylint: disable=broad-except
                 reason = f':{_error_kind(e)}'
                 logger.info('Unexpected exception during fetching job status: '
