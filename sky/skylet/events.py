@@ -134,6 +134,15 @@ class ManagedJobEvent(SkyletEvent):
         logger.info('=== Updating managed job status ===')
         managed_job_utils.update_managed_jobs_statuses()
         managed_job_utils.terminate_leaked_job_clusters()
+        if managed_job_utils.is_consolidation_mode():
+            # pylint: disable=import-outside-toplevel
+            from sky.provision.slurm import instance as slurm_instance
+            try:
+                slurm_instance.cancel_orphaned_allocations()
+            except Exception as e:  # pylint: disable=broad-except
+                logger.warning(
+                    'Failed to reconcile orphaned Slurm allocations: '
+                    f'{e}')
         scheduler.maybe_start_controllers()
 
 
