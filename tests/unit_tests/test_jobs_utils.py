@@ -1685,3 +1685,82 @@ class TestTransientStatusCheckWindow:
                 'the configured retry budget was not honored')
             window.next_backoff()
             assert window.exhausted
+
+
+def test_terminate_leaked_job_clusters_tears_down_done_jobs_only():
+    done = utils.managed_job_state.ManagedJobScheduleState.DONE
+    alive = utils.managed_job_state.ManagedJobScheduleState.ALIVE
+    status = utils.managed_job_state.ManagedJobStatus
+
+    def task(name, schedule_state, task_status, pool=None):
+        return {
+            'job_name': name,
+            'pool': pool,
+            'schedule_state': schedule_state,
+            'status': task_status,
+        }
+
+    tasks = {
+        1: [task('train', done, status.FAILED_CONTROLLER)],
+        2: [task('eval', alive, status.RUNNING)],
+        3: [task('serve', done, status.SUCCEEDED, pool='workers')],
+        4: [task('dev', done, status.SUCCEEDED)],
+        5: [task('sweep', done, status.CANCELLED)],
+    }
+    # dev-4 is an unmanaged cluster that only shares a job cluster's name.
+    unmanaged = ['dev-4']
+    managed = ['train-1', 'eval-2', 'workers-3', 'other-4', 'sweep-5']
+    terminated = []
+
+    def terminate(cluster_name, max_retry):
+        # The next pass retries; a failing cluster must not hold up the rest.
+        assert max_retry == 1
+        terminated.append(cluster_name)
+        if cluster_name == 'sweep-5':
+            raise RuntimeError('teardown failed')
+
+    with mock.patch.object(utils.global_user_state,
+                           'get_cluster_names',
+                           side_effect=lambda exclude_managed_clusters=False:
+                           unmanaged if exclude_managed_clusters else
+                           unmanaged + managed), \
+         mock.patch.object(utils.managed_job_state,
+                           'get_managed_job_tasks',
+                           side_effect=tasks.get), \
+         mock.patch.object(utils, 'terminate_cluster', side_effect=terminate):
+        utils.terminate_leaked_job_clusters()
+
+    assert sorted(terminated) == ['sweep-5', 'train-1']
+
+
+def test_terminate_leaked_job_clusters_bounds_each_pass():
+    """147 leaked records after a deploy took one teardown a minute and held up
+    the managed-job event for hours; a pass tears down a bounded batch at once."""
+    done = utils.managed_job_state.ManagedJobScheduleState.DONE
+    failed = utils.managed_job_state.ManagedJobStatus.FAILED_CONTROLLER
+    leaked = utils._LEAKED_CLUSTER_TEARDOWNS_PER_PASS + 4
+    tasks = {
+        job_id: [{
+            'job_name': 'train',
+            'pool': None,
+            'schedule_state': done,
+            'status': failed,
+        }] for job_id in range(1, leaked + 1)
+    }
+    names = [f'train-{job_id}' for job_id in tasks]
+    terminated = []
+
+    with mock.patch.object(utils.global_user_state,
+                           'get_cluster_names',
+                           side_effect=lambda exclude_managed_clusters=False:
+                           [] if exclude_managed_clusters else names), \
+         mock.patch.object(utils.managed_job_state,
+                           'get_managed_job_tasks',
+                           side_effect=tasks.get), \
+         mock.patch.object(utils, 'terminate_cluster',
+                           side_effect=lambda name, max_retry: terminated.append(
+                               name)):
+        utils.terminate_leaked_job_clusters()
+
+    assert len(terminated) == utils._LEAKED_CLUSTER_TEARDOWNS_PER_PASS
+    assert len(set(terminated)) == len(terminated)
