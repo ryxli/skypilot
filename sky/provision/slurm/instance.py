@@ -985,14 +985,15 @@ def _create_virtual_instance(
         # Reset spinner since nodes are now allocated
         rich_utils.force_update_status(
             ux_utils.spinner_message('Launching', cluster_name=cluster_name))
-        return common.ProvisionRecord(provider_name='slurm',
-                                      region=region,
-                                      zone=partition,
-                                      cluster_name=cluster_name_on_cloud,
-                                      head_instance_id=slurm_utils.instance_id(
-                                          job_id, nodes[0]),
-                                      resumed_instance_ids=[],
-                                      created_instance_ids=[])
+        return common.ProvisionRecord(
+            provider_name='slurm',
+            region=region,
+            zone=partition,
+            cluster_name=cluster_name_on_cloud,
+            head_instance_id=slurm_utils.instance_id(job_id, nodes[0]),
+            resumed_instance_ids=[],
+            created_instance_ids=[],
+            runtime_metadata=common.ProvisionRuntimeMetadata(has_ray=False))
 
     resources = config.node_config
 
@@ -1503,13 +1504,15 @@ touch {sky_cluster_home_dir}/.hushlogin
                          f'=== End of Slurm job logs ===')
         raise e
 
-    return common.ProvisionRecord(provider_name='slurm',
-                                  region=region,
-                                  zone=partition,
-                                  cluster_name=cluster_name_on_cloud,
-                                  head_instance_id=created_instance_ids[0],
-                                  resumed_instance_ids=[],
-                                  created_instance_ids=created_instance_ids)
+    return common.ProvisionRecord(
+        provider_name='slurm',
+        region=region,
+        zone=partition,
+        cluster_name=cluster_name_on_cloud,
+        head_instance_id=created_instance_ids[0],
+        resumed_instance_ids=[],
+        created_instance_ids=created_instance_ids,
+        runtime_metadata=common.ProvisionRuntimeMetadata(has_ray=False))
 
 
 @common_utils.retry
