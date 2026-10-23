@@ -2003,6 +2003,40 @@ class TestUserJobStatusClassification:
         assert 'Job failed (FAILED) (user program failure)' in failure_reason
         assert 'sky jobs logs --controller' in failure_reason
 
+    @pytest.mark.asyncio
+    async def test_terminal_failure_reason_from_runtime(self):
+        """A runtime that observed how the job ended explains the failure,
+        e.g. a scheduler time limit, instead of blaming the user program."""
+
+        controller = self._make_controller()
+        runtime = controller_module.managed_job_runtime
+        observation = runtime.RuntimeObservation(
+            runtime_id='slurm:1',
+            restart_count=0,
+            job_status=job_lib.JobStatus.FAILED,
+            reason='Slurm job 1 ended TIMEOUT')
+        with patch.object(runtime, 'is_registered', return_value=True), \
+             patch.object(runtime, 'observes_recovery', return_value=True), \
+             patch.object(runtime, 'get_recovery_status',
+                          return_value=observation), \
+             patch.object(controller_module.global_user_state,
+                          'get_handle_from_cluster_name',
+                          return_value=MagicMock()), \
+             patch.object(managed_job_state, 'get_runtime_cursor_async',
+                          new=AsyncMock(return_value=None)), \
+             patch.object(managed_job_state, 'observe_runtime_async',
+                          new=AsyncMock(return_value=None)), \
+             patch.object(managed_job_state,
+                          'get_runtime_user_restarts_async',
+                          new=AsyncMock(return_value=0)):
+            mock_set_failed = await self._run_until_terminal(
+                controller, job_lib.JobStatus.FAILED)
+
+        failure_reason = mock_set_failed.call_args.kwargs['failure_reason']
+        assert failure_reason.startswith('Slurm job 1 ended TIMEOUT. ')
+        assert 'user program failure' not in failure_reason
+        assert 'sky jobs logs --controller' in failure_reason
+
 
 class TestUserJobFailureRecoveryEventReason:
     """The RECOVERING job event must state the real trigger.

@@ -1964,15 +1964,23 @@ class JobController:
                         # the user program failed (with the exit code when
                         # the fetch above succeeded), not just where the
                         # logs are.
-                        terminal_desc = exit_code_desc
-                        if terminal_desc is None:
-                            # job_status is non-None here: this branch is
-                            # only entered for user-code-failure statuses.
-                            assert job_status is not None
-                            terminal_desc = f'Job failed ({job_status.value})'
-                        failure_reason = (
-                            f'{terminal_desc} (user program failure). '
-                            f'{failure_reason}')
+                        if (runtime_recovery is not None and
+                                runtime_recovery.reason is not None):
+                            # The runtime observed how the job ended, e.g. at
+                            # its scheduler's time limit.
+                            failure_reason = (f'{runtime_recovery.reason}. '
+                                              f'{failure_reason}')
+                        else:
+                            terminal_desc = exit_code_desc
+                            if terminal_desc is None:
+                                # job_status is non-None here: this branch is
+                                # only entered for user-code-failure statuses.
+                                assert job_status is not None
+                                terminal_desc = (
+                                    f'Job failed ({job_status.value})')
+                            failure_reason = (
+                                f'{terminal_desc} (user program failure). '
+                                f'{failure_reason}')
                         logger.info(
                             f'Task {task_id} failed and will not be retried')
                         await managed_job_state.set_failed_async(
