@@ -865,11 +865,23 @@ def _wait_for_job_ready(
     2. The ready signal file never appears
     """
     poll_interval_seconds = 1
+    # An NFS client keeps a failed lookup until the directory's cached
+    # attributes expire (acdirmax, 60s by default), so the login node can miss
+    # the signal for up to a minute after the allocation creates it. Reading a
+    # directory revalidates it: read the cluster directory, which the
+    # allocation may have just created, and its parent before each probe.
+    cluster_dir = os.path.dirname(ready_signal)
+    revalidate = login_node_runner.command_as_user([
+        'find', f'{os.path.dirname(cluster_dir)}/', cluster_dir, '-maxdepth',
+        '1', '-name',
+        os.path.basename(ready_signal), '-quit'
+    ])
+    probe = (f'{revalidate} >/dev/null 2>&1; '
+             f'{_file_exists_command(login_node_runner, ready_signal)}')
 
     while True:
         rc, _ = _run_on_login_node(login_node_runner,
-                                   _file_exists_command(login_node_runner,
-                                                        ready_signal),
+                                   probe,
                                    'Failed to inspect Slurm startup readiness.',
                                    tolerate_returncodes=(1,))
         if rc == 0:
