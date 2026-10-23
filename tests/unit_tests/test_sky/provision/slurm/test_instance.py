@@ -2055,13 +2055,17 @@ class TestCancelOrphanedAllocations:  # pylint: disable=protected-access
                     instance.global_user_state,
                     'get_slurm_allocation_events_since',
                     return_value=[event]), mock.patch.object(
-                        instance,
-                        '_get_slurm_provider_config',
-                        return_value=provider_config), mock.patch.object(
-                            instance, '_make_slurm_client',
-                            return_value=client):
+                        instance.global_user_state,
+                        'get_cluster_yaml_dict') as get_yaml, mock.patch.object(
+                            instance,
+                            '_get_slurm_provider_config',
+                            return_value=provider_config), mock.patch.object(
+                                instance,
+                                '_make_slurm_client',
+                                return_value=client):
             instance.cancel_orphaned_allocations()
             instance.cancel_orphaned_allocations()
+        get_yaml.assert_not_called()
         client.cancel_job.assert_not_called()
 
     def test_missing_yaml_warns_once_without_cancelling(self, caplog):
