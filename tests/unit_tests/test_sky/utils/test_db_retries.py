@@ -1,5 +1,6 @@
 """Unit tests for sky.utils.db.retries."""
 # pylint: disable=missing-class-docstring,protected-access,unnecessary-lambda
+import asyncio
 import socket
 from typing import Optional
 from unittest import mock
@@ -7,7 +8,9 @@ from unittest import mock
 import asyncpg
 import psycopg2
 import pytest
+from sqlalchemy import create_engine
 import sqlalchemy.exc
+from sqlalchemy.pool import QueuePool
 
 from sky.utils.db import retries
 
@@ -76,6 +79,8 @@ class TestWithDbRetries:
     @pytest.mark.parametrize('exc_factory', [
         lambda: _make_op_error(),
         lambda: sqlalchemy.exc.InterfaceError('s', {}, Exception('x')),
+        lambda: sqlalchemy.exc.TimeoutError('QueuePool exhausted'),
+        lambda: _wrapped(sqlalchemy.exc.TimeoutError('QueuePool exhausted')),
         lambda: ConnectionError('unexpected connection_lost() call'),
         lambda: psycopg2.OperationalError('server closed the connection'),
         lambda: psycopg2.InterfaceError('connection already closed'),
@@ -113,13 +118,39 @@ class TestWithDbRetries:
                 retries.with_db_retries(fn)
         fn.assert_called_once()
 
-    def test_raises_original_after_exhausting(self):
-        op_err = _make_op_error('persistent')
-        fn = mock.Mock(side_effect=op_err)
+    @pytest.mark.parametrize('error', [
+        _make_op_error('persistent'),
+        sqlalchemy.exc.TimeoutError('QueuePool exhausted'),
+    ])
+    def test_raises_original_after_exhausting(self, error):
+        fn = mock.Mock(side_effect=error)
         with mock.patch.object(retries.time, 'sleep'):
-            with pytest.raises(sqlalchemy.exc.OperationalError):
+            with pytest.raises(type(error)) as raised:
                 retries.with_db_retries(fn, max_retries=3)
+        assert raised.value is error
         assert fn.call_count == 3
+
+    def test_pool_timeout_recovers_after_connection_released(self):
+        engine = create_engine('sqlite://',
+                               poolclass=QueuePool,
+                               pool_size=1,
+                               max_overflow=0,
+                               pool_timeout=0)
+        held = engine.connect()
+
+        def checkout(_attempt):
+            with engine.connect() as connection:
+                return connection.exec_driver_sql('SELECT 1').scalar_one()
+
+        try:
+            with mock.patch.object(retries.time,
+                                   'sleep',
+                                   side_effect=lambda _: held.close()) as sleep:
+                assert retries.with_db_retries(checkout, max_retries=2) == 1
+            sleep.assert_called_once()
+        finally:
+            held.close()
+            engine.dispose()
 
     @pytest.mark.parametrize('bad_max_retries', [0, -1, -100])
     def test_invalid_max_retries_raises_value_error(self, bad_max_retries):
@@ -182,6 +213,8 @@ class TestWithDbRetriesAsync:
     @pytest.mark.asyncio
     @pytest.mark.parametrize('exc_factory', [
         lambda: _make_op_error(),
+        lambda: sqlalchemy.exc.TimeoutError('QueuePool exhausted'),
+        lambda: _wrapped(sqlalchemy.exc.TimeoutError('QueuePool exhausted')),
         lambda: ConnectionError('unexpected connection_lost() call'),
         lambda: socket.gaierror(8, 'nodename nor servname provided'),
         lambda: psycopg2.OperationalError('server closed the connection'),
@@ -202,15 +235,30 @@ class TestWithDbRetriesAsync:
         assert coro_fn.call_count == 3
 
     @pytest.mark.asyncio
-    async def test_raises_after_exhausting(self):
-        coro_fn = mock.Mock(
-            side_effect=lambda _attempt: _coro_raising(_make_op_error()))
+    @pytest.mark.parametrize('error', [
+        _make_op_error('persistent'),
+        sqlalchemy.exc.TimeoutError('QueuePool exhausted'),
+    ])
+    async def test_raises_after_exhausting(self, error):
+        coro_fn = mock.AsyncMock(side_effect=error)
         with mock.patch.object(retries.asyncio,
                                'sleep',
                                new_callable=mock.AsyncMock):
-            with pytest.raises(sqlalchemy.exc.OperationalError):
+            with pytest.raises(type(error)) as raised:
                 await retries.with_db_retries_async(coro_fn, max_retries=3)
+        assert raised.value is error
         assert coro_fn.call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_cancellation_is_not_retried(self):
+        coro_fn = mock.AsyncMock(side_effect=asyncio.CancelledError())
+        with mock.patch.object(retries.asyncio,
+                               'sleep',
+                               new_callable=mock.AsyncMock) as sleep:
+            with pytest.raises(asyncio.CancelledError):
+                await retries.with_db_retries_async(coro_fn)
+        coro_fn.assert_awaited_once()
+        sleep.assert_not_awaited()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize('bad_max_retries', [0, -1, -100])

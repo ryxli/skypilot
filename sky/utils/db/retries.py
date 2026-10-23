@@ -47,6 +47,8 @@ def _build_driver_exceptions() -> Tuple[Type[BaseException], ...]:
     return (
         sqlalchemy.exc.OperationalError,
         sqlalchemy.exc.InterfaceError,
+        # Pool checkout can succeed after another session releases a connection.
+        sqlalchemy.exc.TimeoutError,
         *psycopg2_excs,
     )
 
