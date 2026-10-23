@@ -107,6 +107,58 @@ def test_wait_for_all_ranks_returns_once_every_rank_is_done(tmp_path):
     slurm._wait_for_all_ranks(str(run_done_dir), rank=0, num_nodes=4)
 
 
+@pytest.mark.parametrize('is_setup', [False, True])
+def test_setup_done_signal_uses_directory_listing_despite_stale_lookup(
+        tmp_path, monkeypatch, is_setup):
+    """Both setup and run see a shared done file despite stale path lookups."""
+    signal_dir = tmp_path / 'signals'
+    signal_dir.mkdir()
+    done_file = signal_dir / 'setup.done'
+    log_dir = tmp_path / 'logs'
+    log_dir.mkdir()
+
+    monkeypatch.setenv('SLURM_PROCID', '0')
+    monkeypatch.setenv('SLURM_NNODES', '1')
+    monkeypatch.setattr(slurm, '_get_ip_address', lambda: '10.0.0.1')
+    monkeypatch.setattr(slurm, '_get_job_node_ips', lambda: '10.0.0.1')
+    monkeypatch.setattr(slurm, 'run_bash_command_with_log', lambda *a, **kw: 0)
+    monkeypatch.setattr(os.path, 'exists', lambda path: False)
+    monkeypatch.setattr(os.path, 'isdir', lambda path: False)
+    monkeypatch.setattr(
+        os, 'listdir',
+        lambda path: [done_file.name] if str(path) == str(signal_dir) else [])
+    args = [
+        'slurm.py', '--script', 'true', '--log-dir',
+        str(log_dir), '--cluster-num-nodes', '1', '--cluster-ips', '10.0.0.1',
+        '--setup-done-signal-file',
+        str(done_file)
+    ]
+    if is_setup:
+        args.append('--is-setup')
+    monkeypatch.setattr(sys, 'argv', args)
+
+    with pytest.raises(SystemExit) as exit_info:
+        slurm.main()
+
+    assert exit_info.value.code == 0
+
+
+def test_wait_for_all_ranks_ignores_non_rank_done_names(tmp_path):
+    """Metadata files must not let the barrier mistake a missing rank as done."""
+    run_done_dir = tmp_path / 'run_done'
+    run_done_dir.mkdir()
+    (run_done_dir / '0').touch()
+    (run_done_dir / 'metadata.json').touch()
+    late = threading.Timer(1.0, (run_done_dir / '1').touch)
+    late.start()
+    try:
+        slurm._wait_for_all_ranks(str(run_done_dir), rank=0, num_nodes=2)
+    finally:
+        late.cancel()
+
+    assert (run_done_dir / '1').exists()
+
+
 def test_wait_for_all_ranks_waits_for_a_late_rank(tmp_path):
     run_done_dir = tmp_path / 'run_done'
     run_done_dir.mkdir()
