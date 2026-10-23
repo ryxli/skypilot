@@ -125,8 +125,8 @@ def test_setup_done_signal_uses_directory_listing_despite_stale_lookup(
     monkeypatch.setattr(os.path, 'exists', lambda path: False)
     monkeypatch.setattr(os.path, 'isdir', lambda path: False)
     monkeypatch.setattr(
-        os, 'listdir',
-        lambda path: [done_file.name] if str(path) == str(signal_dir) else [])
+        os, 'listdir', lambda path: [done_file.name]
+        if str(path) == str(signal_dir) else [])
     args = [
         'slurm.py', '--script', 'true', '--log-dir',
         str(log_dir), '--cluster-num-nodes', '1', '--cluster-ips', '10.0.0.1',

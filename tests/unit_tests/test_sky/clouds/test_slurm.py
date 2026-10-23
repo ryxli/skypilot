@@ -1907,6 +1907,7 @@ srun() {{
             resume_stopped_nodes=False,
             ports_to_open_on_launch=None,
         )
+
     @staticmethod
     def _make_container_config():
         from sky.provision import common
@@ -1939,7 +1940,6 @@ srun() {{
             ports_to_open_on_launch=None,
         )
 
-
     @patch('sky.provision.slurm.instance._wait_for_job_nodes')
     @patch('sky.provision.slurm.instance.slurm_utils.get_proctrack_type')
     @patch('sky.provision.slurm.instance.slurm_utils.get_partition_info')
@@ -1956,13 +1956,10 @@ srun() {{
         written_script = self._run_and_capture_script('test-cluster', config)
         assert_sbatch_matches_snapshot('containers', written_script)
 
-    @pytest.mark.parametrize(
-        'installed_packages, expected_apt_calls',
-        [
-            ('ca-certificates rsync curl git wget fuse', []),
-            ('ca-certificates curl fuse',
-             ['update', 'install -y rsync git wget']),
-        ])
+    @pytest.mark.parametrize('installed_packages, expected_apt_calls', [
+        ('ca-certificates rsync curl git wget fuse', []),
+        ('ca-certificates curl fuse', ['update', 'install -y rsync git wget']),
+    ])
     @patch('sky.provision.slurm.instance._wait_for_job_nodes')
     @patch('sky.provision.slurm.instance.slurm_utils.get_proctrack_type')
     @patch('sky.provision.slurm.instance.slurm_utils.get_partition_info')
@@ -1970,10 +1967,9 @@ srun() {{
     @patch('sky.provision.slurm.instance.command_runner.'
            'SlurmLoginNodeCommandRunner')
     def test_container_init_installs_only_missing_packages(
-            self, mock_ssh_runner, mock_slurm_client,
-            mock_get_partition_info, mock_get_proctrack_type,
-            mock_wait_for_job_nodes, tmp_path, installed_packages,
-            expected_apt_calls):
+            self, mock_ssh_runner, mock_slurm_client, mock_get_partition_info,
+            mock_get_proctrack_type, mock_wait_for_job_nodes, tmp_path,
+            installed_packages, expected_apt_calls):
         """Container init skips apt or installs precisely missing packages."""
         del mock_wait_for_job_nodes
         self._setup_mocks(mock_ssh_runner, mock_slurm_client,
@@ -1983,22 +1979,19 @@ srun() {{
                                               self._make_container_config())
         match = re.search(
             r'(?ms)^missing=""\nfor package in ca-certificates rsync curl git '
-            r'wget fuse; do\n.*?^fi$',
-            script)
+            r'wget fuse; do\n.*?^fi$', script)
         assert match is not None
 
         fake_bin = tmp_path / 'bin'
         fake_bin.mkdir()
         apt_log = tmp_path / 'apt.log'
-        (fake_bin / 'dpkg').write_text(
-            '#!/bin/bash\n'
-            'case " $INSTALLED_PACKAGES " in\n'
-            '  *" $2 "*) exit 0 ;;\n'
-            '  *) exit 1 ;;\n'
-            'esac\n')
-        (fake_bin / 'apt-get').write_text(
-            '#!/bin/bash\n'
-            'printf "%s\\n" "$*" >> "$APT_LOG"\n')
+        (fake_bin / 'dpkg').write_text('#!/bin/bash\n'
+                                       'case " $INSTALLED_PACKAGES " in\n'
+                                       '  *" $2 "*) exit 0 ;;\n'
+                                       '  *) exit 1 ;;\n'
+                                       'esac\n')
+        (fake_bin / 'apt-get').write_text('#!/bin/bash\n'
+                                          'printf "%s\\n" "$*" >> "$APT_LOG"\n')
         for command in fake_bin.iterdir():
             os.chmod(command, 0o755)
 
