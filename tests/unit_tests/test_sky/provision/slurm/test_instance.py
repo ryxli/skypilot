@@ -1933,7 +1933,8 @@ class TestCancelOrphanedAllocations:  # pylint: disable=protected-access
             instance.cancel_orphaned_allocations()
             instance.cancel_orphaned_allocations()
         assert client.run_command.call_count == 2
-        client.cancel_job.assert_called_once_with('17269')
+        client.cancel_job.assert_called_once_with(
+            '17269', timeout=instance._ORPHAN_ALLOCATION_SQUEUE_TIMEOUT_SECONDS)
 
     def test_current_allocation_is_never_cancelled(self):
         event = self._event()
@@ -1986,7 +1987,8 @@ class TestCancelOrphanedAllocations:  # pylint: disable=protected-access
                                 return_value=client):
             instance.cancel_orphaned_allocations()
             instance.cancel_orphaned_allocations()
-        client.cancel_job.assert_called_once_with('17269')
+        client.cancel_job.assert_called_once_with(
+            '17269', timeout=instance._ORPHAN_ALLOCATION_SQUEUE_TIMEOUT_SECONDS)
 
     # None: a first launch. 17260: a relaunch, whose record keeps the previous
     # allocation's cluster info until the new one is ready.
@@ -2134,16 +2136,40 @@ class TestCancelOrphanedAllocations:  # pylint: disable=protected-access
             instance.cancel_orphaned_allocations()
             instance.cancel_orphaned_allocations()
         assert client.cancel_job.call_args_list == [
-            mock.call('17269'),
-            mock.call('17269'),
+            mock.call(
+                '17269',
+                timeout=instance._ORPHAN_ALLOCATION_SQUEUE_TIMEOUT_SECONDS),
+            mock.call(
+                '17269',
+                timeout=instance._ORPHAN_ALLOCATION_SQUEUE_TIMEOUT_SECONDS),
         ]
         assert any(
             'Failed to cancel orphaned Slurm allocation' in record.message
             for record in caplog.records)
 
-    def test_other_slurm_cluster_and_non_slurm_record_are_ignored(self):
+    def test_an_event_on_an_unqueried_slurm_cluster_is_ignored(self):
         other_cluster_event = self._event()
         other_cluster_event['reason'] = 'Slurm allocation 17269 on ccw3'
+        client = mock.MagicMock()
+        client.run_command.return_value = (0, '17269|test-cluster\n', '')
+        with mock.patch.object(
+                instance.global_user_state,
+                'get_clusters',
+                return_value=self._source_records()), mock.patch.object(
+                    instance.global_user_state,
+                    'get_slurm_allocation_events_since',
+                    return_value=[other_cluster_event]), mock.patch.object(
+                        instance.global_user_state,
+                        'get_cluster_yaml_dict',
+                        return_value={'provider': self._provider_config()
+                                     }), mock.patch.object(instance,
+                                                           '_make_slurm_client',
+                                                           return_value=client):
+            instance.cancel_orphaned_allocations()
+            instance.cancel_orphaned_allocations()
+        client.cancel_job.assert_not_called()
+
+    def test_a_same_named_record_of_another_cloud_does_not_own_it(self):
         non_slurm_event = self._event()
         source_record = self._record('source')
         non_slurm_record = self._record()
@@ -2163,9 +2189,7 @@ class TestCancelOrphanedAllocations:  # pylint: disable=protected-access
                 }]), mock.patch.object(
                     instance.global_user_state,
                     'get_slurm_allocation_events_since',
-                    return_value=[
-                        other_cluster_event, non_slurm_event
-                    ]), mock.patch.object(
+                    return_value=[non_slurm_event]), mock.patch.object(
                         instance.global_user_state,
                         'get_cluster_yaml_dict',
                         return_value={'provider': provider_config
@@ -2174,7 +2198,8 @@ class TestCancelOrphanedAllocations:  # pylint: disable=protected-access
                                                            return_value=client):
             instance.cancel_orphaned_allocations()
             instance.cancel_orphaned_allocations()
-        client.cancel_job.assert_not_called()
+        client.cancel_job.assert_called_once_with(
+            '17269', timeout=instance._ORPHAN_ALLOCATION_SQUEUE_TIMEOUT_SECONDS)
 
 
 class TestRecordAllocation:

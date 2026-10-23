@@ -524,14 +524,10 @@ def cancel_orphaned_allocations() -> None:
         key = (slurm_cluster, allocation['job_id'], allocation['cluster_name'])
         newest = newest_by_name[(slurm_cluster, allocation['cluster_name'])]
         record = records.get(allocation['cluster_name'])
-        if record is not None:
-            if _get_slurm_provider_config(record, slurm_cluster) is None:
-                continue
-            claimed = _record_claims_allocation(record, slurm_cluster,
-                                                allocation['job_id'],
-                                                newest is allocation)
-        else:
-            claimed = False
+        # Cluster names are unique, so a record of that name on another cloud
+        # or Slurm cluster cannot own this allocation.
+        claimed = (record is not None and _record_claims_allocation(
+            record, slurm_cluster, allocation['job_id'], newest is allocation))
         if (claimed or now - allocation['transitioned_at'] <
                 _ORPHAN_ALLOCATION_GRACE_SECONDS):
             _ORPHANED_ALLOCATION_SEEN.discard(key)
@@ -559,7 +555,8 @@ def cancel_orphaned_allocations() -> None:
             continue
         try:
             client = _make_slurm_client(provider_config)
-            client.cancel_job(allocation['job_id'])
+            client.cancel_job(allocation['job_id'],
+                              timeout=_ORPHAN_ALLOCATION_SQUEUE_TIMEOUT_SECONDS)
             logger.warning('Cancelled orphaned Slurm allocation: '
                            f'cluster={allocation["cluster_name"]}, '
                            f'slurm_cluster={slurm_cluster}, '

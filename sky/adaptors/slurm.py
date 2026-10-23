@@ -584,10 +584,10 @@ class SlurmClient:
                                            stream_logs=False)
         logger.debug(f'Successfully cancelled job {job_name}: {stdout}')
 
-    def cancel_job(self, job_id: str) -> None:
-        """Cancel one Slurm job by its allocation ID."""
+    def cancel_job(self, job_id: str, timeout: Optional[int] = None) -> None:
+        """Cancel one Slurm job by allocation ID, as its owner."""
         cmd = ['scancel', job_id]
-        rc, stdout, stderr = self._run_slurm_cmd(cmd)
+        rc, stdout, stderr = self._run_slurm_cmd(cmd, timeout=timeout)
         subprocess_utils.handle_returncode(rc,
                                            shlex.join(cmd),
                                            f'Failed to cancel job {job_id}.',

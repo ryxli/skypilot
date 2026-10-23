@@ -200,8 +200,9 @@ class TestCancelJob:
         with mock.patch.object(client,
                                '_run_slurm_cmd',
                                return_value=(0, '', '')) as run:
-            client.cancel_job('17269')
-        run.assert_called_once_with(['scancel', '17269'])
+            client.cancel_job('17269', timeout=30)
+        # argv runs as the allocation owner; a shell string would run as the SSH user.
+        run.assert_called_once_with(['scancel', '17269'], timeout=30)
 
 
 class TestJobSteps:
