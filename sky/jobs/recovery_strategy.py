@@ -1297,6 +1297,17 @@ class StrategyExecutor:
                         # or after failing over through all the candidates.
                         # Please refer to the docstring of `sky.launch` for more
                         # details of how the exception will be structured.
+                        cancels = [
+                            err for err in e.failover_history if isinstance(
+                                err, exceptions.ProvisionCancelledError)
+                        ]
+                        if cancels:
+                            # Recovery passes raise_on_failure=False to retry
+                            # forever; a retry would resubmit what the user
+                            # cancelled.
+                            logger.error('A user cancelled the allocation: '
+                                         f'{common_utils.format_exception(e)}')
+                            raise exceptions.ProvisionPrechecksError(cancels)
                         if not any(
                                 isinstance(err,
                                            exceptions.ResourcesUnavailableError)

@@ -289,6 +289,15 @@ class ProvisionUnsupportedError(Exception):
     pass
 
 
+class ProvisionCancelledError(ProvisionUnsupportedError):
+    """Raised when a user cancelled the allocation outside SkyPilot.
+
+    A relaunch would rerun what the user stopped, so a managed job ends
+    instead of retrying, including while it recovers.
+    """
+    pass
+
+
 class SkyPilotExcludeArgsBaseException(Exception):
     """Base class for exceptions that don't need args while serialization.
 

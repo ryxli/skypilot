@@ -1920,7 +1920,9 @@ class RetryingVmProvisioner(object):
                 cluster_cannot_fail_over = (
                     prev_cluster_status is not None and
                     prev_cluster_status != status_lib.ClusterStatus.INIT)
-                if cluster_cannot_fail_over or launchable_retries_disabled:
+                # Another candidate would run what the user cancelled.
+                if (cluster_cannot_fail_over or launchable_retries_disabled or
+                        isinstance(e, exceptions.ProvisionCancelledError)):
                     # Two cases cannot reach the tail below. An UP or STOPPED
                     # cluster is never failed over for (see _yield_zones, and
                     # the INIT-only assertion in that tail) -- but an INIT one
