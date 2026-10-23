@@ -1036,7 +1036,6 @@ class TestProvisionExistingClusterError:
         assert e.value.no_failover
         assert message in str(e.value)
 
-
     def test_cancelled_provision_stops_failover_with_history(self):
         cancelled = exceptions.ProvisionCancelledError(
             'Slurm job 1 was CANCELLED by 1015 outside SkyPilot.')
@@ -1052,9 +1051,9 @@ class TestProvisionExistingClusterError:
     def test_unsupported_provision_tries_next_candidate(self):
         provisioner = object.__new__(cloud_vm_ray_backend.RetryingVmProvisioner)
         first = MagicMock()
-        first.assert_launchable.return_value = first
+        setattr(first, 'assert_launchable', lambda: first)
         second = MagicMock()
-        second.assert_launchable.return_value = second
+        setattr(second, 'assert_launchable', lambda: second)
         test_task = MagicMock()
         test_task.is_controller_task.return_value = False
         test_task.best_resources = None
@@ -1074,7 +1073,12 @@ class TestProvisionExistingClusterError:
                 },
             ])
         config = cloud_vm_ray_backend.RetryingVmProvisioner.ToProvisionConfig(
-            'c1', first, 1, None, MagicMock(), prev_cluster_ever_up=False,
+            'c1',
+            first,
+            1,
+            None,
+            MagicMock(),
+            prev_cluster_ever_up=False,
             prev_config_hash=None)
 
         def optimize(*args, **kwargs):
