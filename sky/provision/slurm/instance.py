@@ -2261,7 +2261,15 @@ def _cancel_slurm_job(
         # all job steps but not the batch script; with --full, it signals the
         # batch script and its child processes.
         if pre_step_cancel is not None:
-            pre_step_cancel()
+            # Losing the cached exit code is better than leaking the
+            # allocation; this step needs the runtime venv, which may be gone.
+            try:
+                pre_step_cancel()
+            except exceptions.CommandError as e:
+                logger.warning(
+                    'Failed to preserve the Slurm allocation exit code; '
+                    'proceeding with cancellation. Details: '
+                    f'{common_utils.format_exception(e, use_bracket=True)}')
         client.cancel_jobs_by_name(cluster_name_on_cloud, signal='TERM')
         if pre_batch_cancel is not None:
             try:
