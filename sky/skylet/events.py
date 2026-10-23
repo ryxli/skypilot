@@ -133,6 +133,7 @@ class ManagedJobEvent(SkyletEvent):
 
         logger.info('=== Updating managed job status ===')
         managed_job_utils.update_managed_jobs_statuses()
+        managed_job_utils.terminate_leaked_job_clusters()
         scheduler.maybe_start_controllers()
 
 
