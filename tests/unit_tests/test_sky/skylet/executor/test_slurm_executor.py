@@ -85,16 +85,16 @@ def _fail_reads_under(monkeypatch, run_done_dir, exc_factory, num_failures):
     Returns a one-element list holding how many injected failures are left, so
     callers can assert the injection actually fired.
     """
-    real_open = os.open
+    real_listdir = os.listdir
     remaining = [num_failures]
 
-    def fake_open(path, *args, **kwargs):
+    def fake_listdir(path):
         if str(path).startswith(str(run_done_dir)) and remaining[0] > 0:
             remaining[0] -= 1
             raise exc_factory()
-        return real_open(path, *args, **kwargs)
+        return real_listdir(path)
 
-    monkeypatch.setattr(os, 'open', fake_open)
+    monkeypatch.setattr(os, 'listdir', fake_listdir)
     return remaining
 
 
