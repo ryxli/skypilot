@@ -373,7 +373,11 @@ def _is_runtime_candidate(handle) -> bool:
         return False
     metadata = getattr(handle, 'provision_runtime_metadata', None)
     has_ray = getattr(metadata, 'has_ray', True)
-    return not has_ray
+    # Handles provisioned before a cloud reported its runtime default to Ray;
+    # as in the cluster status refresh, a cloud without Ray has none.
+    resources = getattr(handle, 'launched_resources', None)
+    cloud = getattr(resources, 'cloud', None)
+    return not has_ray or (cloud is not None and not cloud.uses_ray())
 
 
 def _claimants(handle) -> List[ManagedJobRuntime]:

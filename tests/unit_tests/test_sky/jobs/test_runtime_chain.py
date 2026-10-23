@@ -128,6 +128,13 @@ class TestIsRuntimeCandidate:
         handle = _make_handle(has_ray=False)
         assert runtime_chain._is_runtime_candidate(handle) is True
 
+    def test_legacy_handle_of_a_cloud_without_ray_is_candidate(self):
+        """Slurm handles provisioned before Slurm reported has_ray=False."""
+        handle = _make_handle(has_ray=True)
+        handle.launched_resources = types.SimpleNamespace(cloud=mock.MagicMock(
+            uses_ray=mock.MagicMock(return_value=False)))
+        assert runtime_chain._is_runtime_candidate(handle) is True
+
     def test_missing_metadata_is_not_candidate(self):
         """Handles (no ``provision_runtime_metadata``) default to
         legacy — ``getattr(..., 'has_ray', True)``."""
