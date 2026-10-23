@@ -1657,6 +1657,39 @@ class TestCreateVirtualInstance:
         mock_wait_for_job_nodes.assert_called_once()
         assert record.head_instance_id == slurm_utils.instance_id('42', 'node1')
 
+    @pytest.mark.parametrize('existing_job', [False, True])
+    @patch('sky.provision.slurm.instance._wait_for_job_ready')
+    @patch('sky.provision.slurm.instance._wait_for_job_nodes')
+    @patch('sky.provision.slurm.instance.slurm_utils.get_proctrack_type')
+    @patch('sky.provision.slurm.instance.slurm_utils.get_partition_info')
+    @patch('sky.provision.slurm.instance.slurm.SlurmClient')
+    @patch('sky.provision.slurm.instance.command_runner.'
+           'SlurmLoginNodeCommandRunner')
+    def test_record_reports_no_ray(self, mock_ssh_runner, mock_slurm_client,
+                                   mock_get_partition_info,
+                                   mock_get_proctrack_type,
+                                   mock_wait_for_job_nodes,
+                                   mock_wait_for_job_ready, existing_job):
+        del mock_wait_for_job_nodes, mock_wait_for_job_ready
+        self._setup_mocks(mock_ssh_runner, mock_slurm_client,
+                          mock_get_partition_info, 'cpus')
+        mock_get_proctrack_type.return_value = 'cgroup'
+        client = mock_slurm_client.return_value
+        client.query_jobs.side_effect = (
+            lambda name, states: ['42']
+            if existing_job and 'running' in states else [])
+        client.submit_job.return_value = '42'
+
+        record = slurm_instance._create_virtual_instance(
+            region='us-west-2',
+            cluster_name='test-cluster',
+            cluster_name_on_cloud='test-cluster',
+            config=self._make_non_container_config(2),
+        )
+
+        assert client.submit_job.called != existing_job
+        assert not record.runtime_metadata.has_ray
+
     @patch('sky.provision.slurm.instance._wait_for_job_nodes')
     @patch('sky.provision.slurm.instance.slurm_utils.get_proctrack_type')
     @patch('sky.provision.slurm.instance.slurm_utils.get_partition_info')
