@@ -3765,14 +3765,9 @@ class CloudVmRayBackend(backends.Backend['CloudVmRayResourceHandle']):
                 # manually or by the cloud provider.
                 # Optimize the case where the cluster's IPs can be retrieved
                 # from cluster_info.
-                # A provisioner that reports the runtime ready can return while
-                # its scheduler still queues the allocation, which has no nodes
-                # or IPs yet.
-                is_allocation_queued = (runtime_metadata.runtime_setup_done and
-                                        not cluster_info.instances)
-                if not is_allocation_queued:
-                    handle.cached_cluster_info = cluster_info
-                    handle.docker_user = cluster_info.docker_user
+                handle.cached_cluster_info = cluster_info
+                handle.docker_user = cluster_info.docker_user
+                if runtime_metadata.ssh_available:
                     handle.update_cluster_ips(
                         max_attempts=_FETCH_IP_MAX_ATTEMPTS,
                         cluster_info=cluster_info)
