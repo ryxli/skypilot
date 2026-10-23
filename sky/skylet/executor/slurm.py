@@ -4,7 +4,6 @@ This module is invoked on each Slurm compute node via:
     srun python -m sky.skylet.executor.slurm --script=... --log-dir=...
 """
 import argparse
-import errno
 import json
 import os
 import pathlib
@@ -94,6 +93,19 @@ def _get_job_node_ips() -> str:
     return '\n'.join(ips)
 
 
+def _shared_file_exists(path: str) -> bool:
+    """Whether another node's file exists on the shared home, as of now.
+
+    An NFS client keeps a failed lookup until the directory's cached attributes
+    expire (acdirmax, 60s by default); reading the directory revalidates it.
+    Like os.path.exists, an unreadable directory means not yet.
+    """
+    try:
+        return os.path.basename(path) in os.listdir(os.path.dirname(path))
+    except OSError:
+        return False
+
+
 def _wait_for_all_ranks(run_done_dir: str, rank: int, num_nodes: int) -> None:
     """Waits until every rank has written its done file under run_done_dir.
 
@@ -114,29 +126,20 @@ def _wait_for_all_ranks(run_done_dir: str, rank: int, num_nodes: int) -> None:
     # peer's Slurm task state.
     while pending:
         last_error = None
-        for peer in sorted(pending):
-            done_file = os.path.join(run_done_dir, str(peer))
-            try:
-                # Poll each rank's file by name instead of listing the
-                # directory, so that a rank that has not finished yet is an
-                # ordinary ENOENT rather than something the caller has to tell
-                # apart from a filesystem error.
-                os.close(os.open(done_file, os.O_RDONLY))
-                pending.discard(peer)
-            except FileNotFoundError:
-                pass
-            except OSError as e:
-                last_error = e
+        try:
+            # List the directory rather than look each file up: an NFS client
+            # keeps a failed lookup for its attribute cache timeout, while
+            # reading a directory revalidates it. Nothing in this barrier
+            # removes the directory, so its absence is an error too: no rank
+            # will ever be able to report in.
+            pending.difference_update(
+                int(name)
+                for name in os.listdir(run_done_dir)
+                if name.isdigit())
+        except OSError as e:
+            last_error = e
         if not pending:
             return
-        if last_error is None and not os.path.isdir(run_done_dir):
-            # Nothing in this barrier removes the directory, so its absence
-            # means something outside removed it and no rank will ever be
-            # able to report in. Count it as an error rather than as "not
-            # ready yet" so that the wait ends instead of running forever.
-            last_error = FileNotFoundError(errno.ENOENT,
-                                           'Barrier directory is gone',
-                                           run_done_dir)
         if last_error is None:
             # Ranks legitimately finish minutes or hours apart, so a clean but
             # incomplete sweep is not a reason to stop waiting. Only a
@@ -248,8 +251,8 @@ def main():
         pathlib.Path(args.alloc_signal_file).touch()
 
     # Wait for setup to complete.
-    while args.setup_done_signal_file is not None and not os.path.exists(
-            args.setup_done_signal_file):
+    while (args.setup_done_signal_file is not None and
+           not _shared_file_exists(args.setup_done_signal_file)):
         time.sleep(0.1)
 
     # Build log prefix
@@ -319,7 +322,7 @@ def main():
             os.makedirs(run_done_dir, exist_ok=True)
         else:
             # Workers wait for dir to exist (rank 0 creates it)
-            while not os.path.isdir(run_done_dir):
+            while not _shared_file_exists(run_done_dir):
                 time.sleep(0.1)
 
         pathlib.Path(done_file).touch()
