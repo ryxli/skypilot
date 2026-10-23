@@ -1541,6 +1541,27 @@ def _last_event_priority(exists: Any, status: Any, launched_at: Any) -> Any:
         else_=2)
 
 
+@metrics_lib.time_me
+def get_slurm_allocation_events_since(since: int) -> List[Dict[str, Any]]:
+    """Return recent Slurm allocation events, including removed clusters."""
+    engine = _db_manager.get_engine()
+    with orm.Session(engine) as session:
+        rows = session.query(
+            cluster_event_table.c.name,
+            cluster_event_table.c.reason,
+            cluster_event_table.c.transitioned_at,
+        ).filter(
+            cluster_event_table.c.type == ClusterEventType.DEBUG.value,
+            cluster_event_table.c.transitioned_at >= since,
+            cluster_event_table.c.reason.like('Slurm allocation % on %'),
+        ).all()
+    return [{
+        'name': row.name,
+        'reason': row.reason,
+        'transitioned_at': int(row.transitioned_at),
+    } for row in rows]
+
+
 def get_terminal_or_last_status_change_event(
         cluster_hash: str, status: Optional[str],
         launched_at: Optional[int]) -> Optional[str]:
