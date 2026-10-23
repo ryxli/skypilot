@@ -14,6 +14,7 @@ import enum
 import json
 import os
 import pathlib
+import random
 import re
 import shlex
 import textwrap
@@ -1101,6 +1102,10 @@ def update_managed_jobs_statuses(job_id: Optional[int] = None):
         scheduler.job_done(job_id, idempotent=True)
 
 
+# Teardowns of finished jobs' clusters per managed-job event pass, run at once.
+_LEAKED_CLUSTER_TEARDOWNS_PER_PASS = 16
+
+
 def terminate_leaked_job_clusters() -> None:
     """Tear down the clusters that finished managed jobs left behind.
 
@@ -1112,6 +1117,7 @@ def terminate_leaked_job_clusters() -> None:
     managed_clusters = (
         set(global_user_state.get_cluster_names()) -
         set(global_user_state.get_cluster_names(exclude_managed_clusters=True)))
+    leaked = []
     for cluster_name in sorted(managed_clusters):
         match = re.fullmatch(r'.+-(\d+)', cluster_name)
         if match is None:
@@ -1128,6 +1134,10 @@ def terminate_leaked_job_clusters() -> None:
                 managed_job_state.ManagedJobScheduleState.DONE or
                 not all(task['status'].is_terminal() for task in tasks)):
             continue
+        leaked.append((job_id, cluster_name))
+
+    def _terminate(job_and_cluster: Tuple[int, str]) -> None:
+        job_id, cluster_name = job_and_cluster
         logger.info(f'Managed job {job_id} is done but its cluster '
                     f'{cluster_name} still exists. Terminating it.')
         try:
@@ -1137,6 +1147,16 @@ def terminate_leaked_job_clusters() -> None:
         except Exception as e:  # pylint: disable=broad-except
             logger.warning(f'Failed to terminate cluster {cluster_name}: '
                            f'{common_utils.format_exception(e)}')
+
+    # The pass holds up the managed-job event, and a teardown takes about a
+    # minute (ccw2, 2026-10-23: 147 left after a deploy, one a minute). Tear a
+    # bounded sample down at once; sampling keeps clusters that keep failing
+    # from starving the rest.
+    batch = random.sample(leaked,
+                          min(len(leaked), _LEAKED_CLUSTER_TEARDOWNS_PER_PASS))
+    subprocess_utils.run_in_parallel(_terminate,
+                                     batch,
+                                     num_threads=len(batch) or None)
 
 
 def get_job_timestamp(backend: 'backends.CloudVmRayBackend', cluster_name: str,

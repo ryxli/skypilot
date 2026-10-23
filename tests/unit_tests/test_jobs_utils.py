@@ -1731,3 +1731,36 @@ def test_terminate_leaked_job_clusters_tears_down_done_jobs_only():
         utils.terminate_leaked_job_clusters()
 
     assert sorted(terminated) == ['sweep-5', 'train-1']
+
+
+def test_terminate_leaked_job_clusters_bounds_each_pass():
+    """147 leaked records after a deploy took one teardown a minute and held up
+    the managed-job event for hours; a pass tears down a bounded batch at once."""
+    done = utils.managed_job_state.ManagedJobScheduleState.DONE
+    failed = utils.managed_job_state.ManagedJobStatus.FAILED_CONTROLLER
+    leaked = utils._LEAKED_CLUSTER_TEARDOWNS_PER_PASS + 4
+    tasks = {
+        job_id: [{
+            'job_name': 'train',
+            'pool': None,
+            'schedule_state': done,
+            'status': failed,
+        }] for job_id in range(1, leaked + 1)
+    }
+    names = [f'train-{job_id}' for job_id in tasks]
+    terminated = []
+
+    with mock.patch.object(utils.global_user_state,
+                           'get_cluster_names',
+                           side_effect=lambda exclude_managed_clusters=False:
+                           [] if exclude_managed_clusters else names), \
+         mock.patch.object(utils.managed_job_state,
+                           'get_managed_job_tasks',
+                           side_effect=tasks.get), \
+         mock.patch.object(utils, 'terminate_cluster',
+                           side_effect=lambda name, max_retry: terminated.append(
+                               name)):
+        utils.terminate_leaked_job_clusters()
+
+    assert len(terminated) == utils._LEAKED_CLUSTER_TEARDOWNS_PER_PASS
+    assert len(set(terminated)) == len(terminated)
