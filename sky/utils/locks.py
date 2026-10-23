@@ -207,17 +207,15 @@ class PostgresLock(DistributedLock):
     def _get_connection(self) -> sqlalchemy.pool.PoolProxiedConnection:
         """Get database connection."""
         # Session-scoped advisory locks hold one connection across their whole
-        # lifetime, which is unsafe through a transaction-mode pooler (the
-        # backend can change between statements). Use a direct engine so the
-        # lock connection bypasses any configured pooler; when none is
-        # configured this is the same engine global_user_state uses.
-        engine = db_utils.get_engine(None, direct=True)
+        # lifetime, so they cannot share the QueuePool used by short state
+        # queries. no_pool gives the lock a dedicated NullPool engine while
+        # direct still bypasses any configured transaction-mode pooler.
+        engine = db_utils.get_engine(None, direct=True, no_pool=True)
         if engine.dialect.name != db_utils.SQLAlchemyDialect.POSTGRESQL.value:
             raise ValueError('PostgresLock requires PostgreSQL database. '
                              f'Current dialect: {engine.dialect.name}')
-        # Borrow a dedicated connection from the pool. Idempotent under
-        # retry: raw_connection() either returns a checked-out conn or
-        # raises with nothing taken — no partial state, no leak.
+        # raw_connection() owns the advisory-lock session until
+        # _close_connection().
         connection = engine.raw_connection()
         # Advisory locks are session-scoped: they need no transaction and
         # persist until explicitly released or the session ends. Without

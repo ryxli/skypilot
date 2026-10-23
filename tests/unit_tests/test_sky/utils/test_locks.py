@@ -431,7 +431,7 @@ class TestPostgresLock:
 
     @mock.patch.object(db_utils, 'get_engine')
     def test_postgres_lock_get_connection_success(self, mock_get_engine):
-        """Test successful database connection via a direct engine."""
+        """Lock connections use an isolated direct NullPool engine."""
         mock_engine = mock.Mock()
         mock_engine.dialect.name = db_utils.SQLAlchemyDialect.POSTGRESQL.value
         mock_connection = mock.Mock()
@@ -442,9 +442,7 @@ class TestPostgresLock:
         result = lock._get_connection()
 
         assert result is mock_connection
-        mock_get_engine.assert_called_once()
-        # The lock must bypass any configured pooler.
-        assert mock_get_engine.call_args.kwargs.get('direct') is True
+        mock_get_engine.assert_called_once_with(None, direct=True, no_pool=True)
         mock_engine.raw_connection.assert_called_once()
 
     @mock.patch.object(db_utils, 'get_engine')
