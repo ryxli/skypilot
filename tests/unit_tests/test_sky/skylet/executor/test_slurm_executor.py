@@ -107,7 +107,7 @@ def test_wait_for_all_ranks_returns_once_every_rank_is_done(tmp_path):
     slurm._wait_for_all_ranks(str(run_done_dir), rank=0, num_nodes=4)
 
 
-@pytest.mark.parametrize('is_setup', [False, True])
+@pytest.mark.parametrize('is_setup', [False, True], ids=['run', 'setup'])
 def test_setup_done_signal_uses_directory_listing_despite_stale_lookup(
         tmp_path, monkeypatch, is_setup):
     """Both setup and run see a shared done file despite stale path lookups."""
