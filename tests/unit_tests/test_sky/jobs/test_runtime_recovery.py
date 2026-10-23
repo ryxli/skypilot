@@ -471,6 +471,9 @@ async def test_starting_observation_can_finish(database, monkeypatch, terminal):
         connection.execute(state.spot_table.update().values(
             status='STARTING', start_at=None, last_recovered_at=-1))
     monkeypatch.setattr(state.time, 'time', lambda: 300)
+    # A runtime that queues the launched job keeps the task STARTING.
+    await observe(0, waiting=True)
+    assert task_row(database)['status'] == 'STARTING'
     await observe(0, running=not terminal, terminal=terminal, started_at=280)
     row = task_row(database)
     assert row['status'] == 'RUNNING'
@@ -480,6 +483,48 @@ async def test_starting_observation_can_finish(database, monkeypatch, terminal):
                                     end_time=290,
                                     callback_func=mock.AsyncMock())
     assert task_row(database)['status'] == 'SUCCEEDED'
+
+
+@pytest.mark.asyncio
+async def test_a_queued_relaunch_recovers_when_the_runtime_runs_it(
+        database, monkeypatch):
+    # set_recovering_async after a node failure: the failed run is counted.
+    with database.begin() as connection:
+        connection.execute(state.spot_table.update().values(
+            status='RECOVERING', recovering_from_failure=True, job_duration=50))
+    monkeypatch.setattr(state.time, 'time', lambda: 300)
+    await observe(0, runtime_id='allocation-b', waiting=True)
+    assert task_row(database)['status'] == 'RECOVERING'
+    await observe(0, runtime_id='allocation-b', running=True, started_at=280)
+    row = task_row(database)
+    assert row['status'] == 'RUNNING'
+    assert row['recovery_count'] == 1
+    # The queue wait is not job time: the new run starts at the runtime's start.
+    assert row['job_duration'] == 50
+    assert row['last_recovered_at'] == 280
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('observed, runtime_marks', [
+    (runtime.RuntimeObservation('slurm:1', 0, job_lib.JobStatus.PENDING), True),
+    (runtime.RuntimeObservation('slurm:1', 0, job_lib.JobStatus.RUNNING), True),
+    (runtime.RuntimeObservation('slurm:1', 0, None), True),
+    (RuntimeError('login node unreachable'), True),
+    (None, False),
+])
+async def test_a_runtime_that_observes_the_launch_marks_its_start(
+        monkeypatch, observed, runtime_marks):
+    """A Slurm-native launch ends at sbatch acceptance, before Slurm runs it."""
+    controller = controller_module.JobController.__new__(
+        controller_module.JobController)
+    controller._job_id = 42
+    monkeypatch.setattr(runtime, 'observes_recovery', lambda: True)
+    monkeypatch.setattr(controller_module.global_user_state,
+                        'get_handle_from_cluster_name', mock.Mock())
+    monkeypatch.setattr(runtime, 'get_recovery_status',
+                        mock.Mock(side_effect=[observed]))
+    assert await controller._runtime_marks_start('cluster', 0,
+                                                 mock.Mock()) == runtime_marks
 
 
 @pytest.mark.asyncio

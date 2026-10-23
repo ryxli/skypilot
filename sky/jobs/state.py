@@ -4325,19 +4325,27 @@ def _plan_runtime_observation(
                 values.update(status=ManagedJobStatus.RECOVERING.value,
                               recovering_from_failure=False)
         elif controller_resumed:
-            # The runtime kept running while the controller was recovering.
-            # Restore its baseline to avoid counting that interval twice.
+            if cursor.get('last_running_at') is not None:
+                # The allocation kept running while the controller recovered:
+                # restore its baseline so that interval counts once.
+                job_duration = cursor.get('running_duration',
+                                          row['job_duration'])
+                running_since = cursor.get('running_since', resume_time)
+                event = 'Runtime is still running'
+            else:
+                # Never seen running, e.g. a relaunch left queued: it starts
+                # now.
+                job_duration = row['job_duration']
+                running_since = resume_time
+                event = 'Job has recovered'
             values.update(status=ManagedJobStatus.RUNNING.value,
                           start_at=row['start_at'] or resume_time,
-                          job_duration=cursor.get('running_duration',
-                                                  row['job_duration']),
-                          last_recovered_at=cursor.get('running_since',
-                                                       resume_time),
+                          job_duration=job_duration,
+                          last_recovered_at=running_since,
                           recovering_from_failure=None)
             if row['recovering_from_failure']:
                 values['recovery_count'] = (row['recovery_count'] or 0) + 1
-            events.append(
-                (ManagedJobStatus.RUNNING, 'Runtime is still running'))
+            events.append((ManagedJobStatus.RUNNING, event))
             callbacks.append('RECOVERED')
         cursor = dict(
             runtime_id=runtime_id,

@@ -876,6 +876,34 @@ class JobController:
             self._job_id)
         return cluster_name is None
 
+    async def _runtime_marks_start(self, cluster_name: str, task_id: int,
+                                   task: 'sky.Task') -> bool:
+        """Whether a runtime observes the launched job, so it marks the start.
+
+        Such a launch can return while the runtime's scheduler still queues
+        the job. The task then stays STARTING or RECOVERING until the
+        monitor's observation reports the job running and its actual start.
+        """
+        if not managed_job_runtime.observes_recovery():
+            return False
+        handle = await asyncio.to_thread(
+            global_user_state.get_handle_from_cluster_name, cluster_name)
+        try:
+            observation = await asyncio.to_thread(
+                managed_job_runtime.get_recovery_status,
+                handle,
+                cluster_name,
+                job_id=self._job_id,
+                task_id=task_id,
+                task=task)
+        except Exception as e:  # pylint: disable=broad-except
+            # Only a runtime claiming the handle observes it, so the monitor
+            # owns the start and retries within its transient window.
+            logger.info('Launched job not observed yet: '
+                        f'{common_utils.format_exception(e)}')
+            return True
+        return observation is not None
+
     async def _run_one_task(self, task_id: int, task: 'sky.Task') -> bool:
         """Busy loop monitoring cluster status and handling recovery.
 
@@ -1084,7 +1112,8 @@ class JobController:
                 raise asyncio.CancelledError()
         assert cluster_name is not None, (cluster_name, job_id_on_pool_cluster)
 
-        if not is_resume:
+        if not is_resume and not await self._runtime_marks_start(
+                cluster_name, task_id, task):
             await managed_job_state.set_started_async(
                 job_id=self._job_id,
                 task_id=task_id,
@@ -2148,13 +2177,15 @@ class JobController:
                         recovered_time=recovered_time,
                         callback_func=callback_func,
                         count_recovery=False)
-                else:
+                elif not await self._runtime_marks_start(
+                        cluster_name, task_id, task):
                     await managed_job_state.set_started_async(
                         self._job_id,
                         task_id,
                         start_time=recovered_time,
                         callback_func=callback_func)
-            else:
+            elif not await self._runtime_marks_start(cluster_name, task_id,
+                                                     task):
                 await managed_job_state.set_recovered_async(
                     self._job_id,
                     task_id,
@@ -2621,7 +2652,8 @@ class JobController:
                 global_user_state.get_handle_from_cluster_name, cluster_name)
 
             # Only set STARTED state if not resuming (already started before)
-            if not is_resuming:
+            if not is_resuming and not await self._runtime_marks_start(
+                    cluster_name, task_id, task):
                 callback_func = managed_job_utils.event_callback_func(
                     job_id=self._job_id, task_id=task_id, task=task)
                 await managed_job_state.set_started_async(
