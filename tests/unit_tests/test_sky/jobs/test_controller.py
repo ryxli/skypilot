@@ -2476,7 +2476,6 @@ class TestTransientJobStatusRecoveryWindow:
 
         mock_self = MagicMock()
         mock_self._job_id = 1
-        mock_self._runtime_marks_start = AsyncMock(return_value=False)
         mock_self._pool = None
 
         executor = MagicMock()
@@ -2579,7 +2578,6 @@ class TestTransientJobStatusRecoveryWindow:
 
         mock_self = MagicMock()
         mock_self._job_id = 1
-        mock_self._runtime_marks_start = AsyncMock(return_value=False)
         mock_self._pool = None
 
         executor = MagicMock()
@@ -2790,7 +2788,6 @@ class TestRuntimeCursorReads:
         instance._pool = None
         instance._update_live_log_links = AsyncMock(return_value=True)
         instance._cleanup_cluster = AsyncMock()
-        instance._runtime_marks_start = AsyncMock(return_value=False)
         return instance
 
     async def _run(self, instance, executor=None):
@@ -3813,7 +3810,6 @@ class TestJobGroupPhase2FailurePropagation:
             side_effect=[('cluster-a', executors[0]), ('cluster-b',
                                                        executors[1])])
         controller._cleanup_job_group_clusters = AsyncMock()
-        controller._runtime_marks_start = AsyncMock(return_value=False)
         return controller
 
     @pytest.mark.asyncio
