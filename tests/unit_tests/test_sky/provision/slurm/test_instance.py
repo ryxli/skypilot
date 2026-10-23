@@ -1849,6 +1849,201 @@ class TestPendingCallback:
         ]
 
 
+class TestCancelOrphanedAllocations:  # pylint: disable=protected-access
+    """Reconcile allocation events with live Slurm state."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_seen(self):
+        instance._ORPHANED_ALLOCATION_SEEN.clear()
+        yield
+        instance._ORPHANED_ALLOCATION_SEEN.clear()
+
+    @staticmethod
+    def _event(job_id='17269', cluster_name=_CLUSTER):
+        return {
+            'name': cluster_name,
+            'reason': f'Slurm allocation {job_id} on ccw2',
+            'transitioned_at': int(instance.time.time()) - 601,
+        }
+
+    @staticmethod
+    def _record(job_id=None, init=False):
+        handle = mock.MagicMock()
+        handle.launched_resources.cloud = instance.clouds.Slurm()
+        handle.launched_resources.region = 'ccw2'
+        if job_id is None:
+            handle.cached_cluster_info = None
+        else:
+            head = mock.MagicMock()
+            head.tags = {'job_id': job_id}
+            handle.cached_cluster_info.get_head_instance.return_value = head
+        return {
+            'handle': handle,
+            'status': (instance.status_lib.ClusterStatus.INIT
+                       if init else instance.status_lib.ClusterStatus.UP),
+        }
+
+    @staticmethod
+    def _source_records(record=None):
+        if record is None:
+            record = TestCancelOrphanedAllocations._record('source')
+            return [{'name': 'source', **record}]
+        return [{'name': _CLUSTER, **record}]
+
+    @staticmethod
+    def _provider_config():
+        return {
+            'cluster': 'ccw2',
+            'ssh': {
+                'hostname': 'login',
+                'port': 22,
+                'user': 'alice',
+            },
+            'slurm_user': 'alice',
+        }
+
+    def test_missing_record_cancels_on_second_pass_after_grace(self):
+        event = self._event()
+        client = mock.MagicMock()
+        client.run_command.side_effect = [
+            (0, '17269|test-cluster\n', ''),
+            (0, '17269|test-cluster\n', ''),
+            (0, '', ''),
+        ]
+        provider_config = self._provider_config()
+        with mock.patch.object(
+                instance.global_user_state,
+                'get_clusters',
+                return_value=self._source_records()), mock.patch.object(
+                    instance.global_user_state,
+                    'get_slurm_allocation_events_since',
+                    return_value=[event]), mock.patch.object(
+                        instance.global_user_state,
+                        'get_cluster_yaml_dict',
+                        return_value={
+                            'provider': provider_config
+                        }), mock.patch.object(
+                            instance,
+                            '_get_slurm_provider_config',
+                            return_value=provider_config), mock.patch.object(
+                                instance,
+                                '_make_slurm_client',
+                                return_value=client):
+            instance.cancel_orphaned_allocations()
+            instance.cancel_orphaned_allocations()
+        assert client.run_command.call_count == 3
+        assert 'scancel -- 17269' in client.run_command.call_args.args[0]
+
+    def test_current_allocation_is_never_cancelled(self):
+        event = self._event()
+        record = self._record('17269')
+        client = mock.MagicMock()
+        client.run_command.return_value = (0, '17269|test-cluster\n', '')
+        provider_config = self._provider_config()
+        with mock.patch.object(
+                instance.global_user_state,
+                'get_clusters',
+                return_value=self._source_records(record)), mock.patch.object(
+                    instance.global_user_state,
+                    'get_slurm_allocation_events_since',
+                    return_value=[event]), mock.patch.object(
+                        instance,
+                        '_get_slurm_provider_config',
+                        return_value=provider_config), mock.patch.object(
+                            instance, '_make_slurm_client',
+                            return_value=client):
+            instance.cancel_orphaned_allocations()
+            instance.cancel_orphaned_allocations()
+        assert all('scancel' not in call.args[0]
+                   for call in client.run_command.call_args_list)
+
+    def test_replaced_allocation_is_cancelled(self):
+        event = self._event()
+        record = self._record('17270')
+        client = mock.MagicMock()
+        client.run_command.side_effect = [
+            (0, '17269|test-cluster\n', ''),
+            (0, '17269|test-cluster\n', ''),
+            (0, '', ''),
+        ]
+        provider_config = self._provider_config()
+        with mock.patch.object(
+                instance.global_user_state,
+                'get_clusters',
+                return_value=self._source_records(record)), mock.patch.object(
+                    instance.global_user_state,
+                    'get_slurm_allocation_events_since',
+                    return_value=[event]), mock.patch.object(
+                        instance.global_user_state,
+                        'get_cluster_yaml_dict',
+                        return_value={
+                            'provider': provider_config
+                        }), mock.patch.object(
+                            instance,
+                            '_get_slurm_provider_config',
+                            return_value=provider_config), mock.patch.object(
+                                instance,
+                                '_make_slurm_client',
+                                return_value=client):
+            instance.cancel_orphaned_allocations()
+            instance.cancel_orphaned_allocations()
+        assert 'scancel -- 17269' in client.run_command.call_args.args[0]
+
+    # None: a first launch. 17260: a relaunch, whose record keeps the previous
+    # allocation's cluster info until the new one is ready.
+    @pytest.mark.parametrize('previous_job_id', [None, '17260'])
+    def test_init_record_claims_its_newest_pending_allocation(
+            self, previous_job_id):
+        event = self._event()
+        record = self._record(previous_job_id, init=True)
+        client = mock.MagicMock()
+        client.run_command.return_value = (0, '17269|test-cluster\n', '')
+        provider_config = self._provider_config()
+        with mock.patch.object(
+                instance.global_user_state,
+                'get_clusters',
+                return_value=self._source_records(record)), mock.patch.object(
+                    instance.global_user_state,
+                    'get_slurm_allocation_events_since',
+                    return_value=[event]), mock.patch.object(
+                        instance,
+                        '_get_slurm_provider_config',
+                        return_value=provider_config), mock.patch.object(
+                            instance, '_make_slurm_client',
+                            return_value=client):
+            instance.cancel_orphaned_allocations()
+            instance.cancel_orphaned_allocations()
+        assert all('scancel' not in call.args[0]
+                   for call in client.run_command.call_args_list)
+
+    @pytest.mark.parametrize('db_failure', [True, False])
+    def test_db_or_squeue_failure_cancels_nothing(self, db_failure):
+        event = self._event()
+        client = mock.MagicMock()
+        client.run_command.return_value = (1, '', 'squeue down')
+        provider_config = self._provider_config()
+        with mock.patch.object(
+                instance.global_user_state,
+                'get_clusters',
+                return_value=self._source_records()), mock.patch.object(
+                    instance.global_user_state,
+                    'get_slurm_allocation_events_since',
+                    return_value=[event],
+                    side_effect=(
+                        RuntimeError('db down')
+                        if db_failure else None)), mock.patch.object(
+                            instance,
+                            '_get_slurm_provider_config',
+                            return_value=provider_config), mock.patch.object(
+                                instance,
+                                '_make_slurm_client',
+                                return_value=client):
+            instance.cancel_orphaned_allocations()
+            instance.cancel_orphaned_allocations()
+        assert not any('scancel' in call.args[0]
+                       for call in client.run_command.call_args_list)
+
+
 class TestRecordAllocation:
     """Which Slurm allocation backs a cluster, persisted as an event.
 

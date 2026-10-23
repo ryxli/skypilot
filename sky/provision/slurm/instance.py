@@ -12,7 +12,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 import uuid
 
 import colorama
-
+from sky import clouds
 from sky import exceptions
 from sky import global_user_state
 from sky import sky_logging
@@ -64,6 +64,13 @@ _TERMINATION_GRACE_PERIOD_SECONDS = 30
 # TERM handlers before the stop path escalates individual steps to KILL.
 _WORKLOAD_STEP_TERM_GRACE_PERIOD_SECONDS = 40
 _WORKLOAD_STEP_DRAIN_TIMEOUT_SECONDS = 120
+
+_ORPHAN_ALLOCATION_GRACE_SECONDS = 10 * 60
+_ORPHAN_ALLOCATION_LOOKBACK_DAYS = 14
+_ORPHAN_ALLOCATION_SQUEUE_TIMEOUT_SECONDS = 30
+_SLURM_ALLOCATION_EVENT_PATTERN = re.compile(
+    r'^Slurm allocation (?P<job_id>[0-9]+) on (?P<slurm_cluster>.+)$')
+_ORPHANED_ALLOCATION_SEEN: Set[Tuple[str, str, str]] = set()
 _WORKLOAD_KEEPER_STEP_NAMES = frozenset({
     _CONTAINER_KEEPER_STEP_NAME,
     _SKYLET_KEEPER_STEP_NAME,
@@ -373,6 +380,188 @@ def _record_allocation(cluster_name: str, slurm_cluster: str,
     except Exception as e:  # pylint: disable=broad-except
         logger.debug(f'Failed to record the Slurm allocation of '
                      f'{cluster_name}: {e}')
+
+
+def _record_claims_allocation(record: Dict[str, Any], slurm_cluster: str,
+                              job_id: str, event_is_newest: bool) -> bool:
+    """Return whether a live record still owns an allocation event."""
+    handle = record['handle']
+    resources = getattr(handle, 'launched_resources', None)
+    if (resources is None or not isinstance(resources.cloud, clouds.Slurm) or
+            resources.region != slurm_cluster):
+        return False
+    cluster_info = getattr(handle, 'cached_cluster_info', None)
+    head = (cluster_info.get_head_instance()
+            if cluster_info is not None else None)
+    tags = head.tags if head is not None else {}
+    if str(tags.get('job_id')) == job_id:
+        return True
+    # A launch keeps the previous allocation's cluster info in the record until
+    # its own allocation is ready, which can take as long as Slurm queues it.
+    return (record['status'] is status_lib.ClusterStatus.INIT and
+            event_is_newest)
+
+
+def _get_slurm_provider_config(record: Dict[str, Any],
+                               slurm_cluster: str) -> Optional[Dict[str, Any]]:
+    """Get a live Slurm record's provider config for its cluster."""
+    handle = record['handle']
+    resources = getattr(handle, 'launched_resources', None)
+    if (resources is None or not isinstance(resources.cloud, clouds.Slurm) or
+            resources.region != slurm_cluster):
+        return None
+    config = global_user_state.get_cluster_yaml_dict(handle.cluster_yaml)
+    provider_config = config.get('provider')
+    if (not isinstance(provider_config, dict) or
+            slurm_utils.get_slurm_cluster_from_config(provider_config) !=
+            slurm_cluster):
+        return None
+    return provider_config
+
+
+def cancel_orphaned_allocations() -> None:
+    """Cancel twice-observed Slurm allocations no live record owns."""
+    try:
+        records_list = global_user_state.get_clusters(summary_response=True)
+        records = {record['name']: record for record in records_list}
+        provider_configs = {}
+        for record in records_list:
+            resources = getattr(record['handle'], 'launched_resources', None)
+            if (resources is None or
+                    not isinstance(resources.cloud, clouds.Slurm) or
+                    resources.region in provider_configs):
+                continue
+            try:
+                provider_config = _get_slurm_provider_config(
+                    record, resources.region)
+            except Exception as e:  # pylint: disable=broad-except
+                logger.warning('Failed to read Slurm provider config for '
+                               f'{record["name"]}: '
+                               f'{common_utils.format_exception(e)}')
+                continue
+            if provider_config is not None:
+                provider_configs[resources.region] = provider_config
+    except Exception as e:  # pylint: disable=broad-except
+        _ORPHANED_ALLOCATION_SEEN.clear()
+        logger.warning('Failed to read Slurm allocation reconciliation state: '
+                       f'{common_utils.format_exception(e)}')
+        return
+
+    live_jobs_by_slurm = {}
+    for slurm_cluster, provider_config in provider_configs.items():
+        try:
+            client = _make_slurm_client(provider_config)
+            rc, stdout, stderr = client.run_command(
+                'squeue -h -t PD,CF,R,S -o %i\\|%j',
+                timeout=_ORPHAN_ALLOCATION_SQUEUE_TIMEOUT_SECONDS)
+            if rc != 0:
+                raise RuntimeError(f'squeue exited {rc}: {stderr}')
+            live_jobs_by_slurm[slurm_cluster] = {
+                line.split('|', 1)[0]: line.split('|', 1)[1]
+                for line in stdout.splitlines()
+                if len(line.split('|', 1)) == 2 and
+                line.split('|', 1)[0].isdigit()
+            }
+        except Exception as e:  # pylint: disable=broad-except
+            _ORPHANED_ALLOCATION_SEEN.difference_update({
+                key for key in _ORPHANED_ALLOCATION_SEEN
+                if key[0] == slurm_cluster
+            })
+            logger.warning(
+                'Failed to query Slurm allocations on '
+                f'{slurm_cluster}: {common_utils.format_exception(e)}')
+
+    now = int(time.time())
+    try:
+        events = global_user_state.get_slurm_allocation_events_since(
+            now - _ORPHAN_ALLOCATION_LOOKBACK_DAYS * 24 * 60 * 60)
+    except Exception as e:  # pylint: disable=broad-except
+        _ORPHANED_ALLOCATION_SEEN.clear()
+        logger.warning('Failed to read Slurm allocation events: '
+                       f'{common_utils.format_exception(e)}')
+        return
+    allocations = []
+    for event in events:
+        match = _SLURM_ALLOCATION_EVENT_PATTERN.fullmatch(event['reason'])
+        if match is None:
+            continue
+        slurm_cluster = match.group('slurm_cluster')
+        if match.group('job_id') not in live_jobs_by_slurm.get(
+                slurm_cluster, {}):
+            continue
+        allocations.append({
+            'cluster_name': event['name'],
+            'job_id': match.group('job_id'),
+            'slurm_cluster': slurm_cluster,
+            'transitioned_at': event['transitioned_at'],
+        })
+    newest_by_job = {}
+    newest_by_name = {}
+    for allocation in allocations:
+        job_key = (allocation['slurm_cluster'], allocation['job_id'])
+        name_key = (allocation['slurm_cluster'], allocation['cluster_name'])
+        if (allocation['transitioned_at'] >= newest_by_job.get(
+                job_key, allocation)['transitioned_at']):
+            newest_by_job[job_key] = allocation
+        if (allocation['transitioned_at'], int(allocation['job_id'])) >= (
+                newest_by_name.get(name_key, allocation)['transitioned_at'],
+                int(newest_by_name.get(name_key, allocation)['job_id'])):
+            newest_by_name[name_key] = allocation
+
+    for allocation in newest_by_job.values():
+        slurm_cluster = allocation['slurm_cluster']
+        key = (slurm_cluster, allocation['job_id'], allocation['cluster_name'])
+        newest = newest_by_name[(slurm_cluster, allocation['cluster_name'])]
+        record = records.get(allocation['cluster_name'])
+        try:
+            claimed = (record is not None and _record_claims_allocation(
+                record, slurm_cluster, allocation['job_id'],
+                newest is allocation))
+        except Exception as e:  # pylint: disable=broad-except
+            _ORPHANED_ALLOCATION_SEEN.discard(key)
+            logger.warning('Failed to inspect Slurm cluster record '
+                           f'{allocation["cluster_name"]}: '
+                           f'{common_utils.format_exception(e)}')
+            continue
+        if (claimed or now - allocation['transitioned_at'] <
+                _ORPHAN_ALLOCATION_GRACE_SECONDS):
+            _ORPHANED_ALLOCATION_SEEN.discard(key)
+            continue
+        if key not in _ORPHANED_ALLOCATION_SEEN:
+            _ORPHANED_ALLOCATION_SEEN.add(key)
+            continue
+        try:
+            yaml_path = f'{allocation["cluster_name"]}.yml'
+            provider_config = global_user_state.get_cluster_yaml_dict(
+                yaml_path).get('provider')
+            if (not isinstance(provider_config, dict) or
+                    slurm_utils.get_slurm_cluster_from_config(provider_config)
+                    != slurm_cluster):
+                raise ValueError('missing matching provider config')
+        except Exception as e:  # pylint: disable=broad-except
+            _ORPHANED_ALLOCATION_SEEN.discard(key)
+            logger.warning('Cannot cancel orphaned Slurm allocation '
+                           f'{allocation["job_id"]} on {slurm_cluster}: '
+                           f'cluster YAML is unavailable; cancel it manually. '
+                           f'Details: {common_utils.format_exception(e)}')
+            continue
+        try:
+            client = _make_slurm_client(provider_config)
+            rc, _, stderr = client.run_command(
+                f'scancel -- {allocation["job_id"]}',
+                timeout=_ORPHAN_ALLOCATION_SQUEUE_TIMEOUT_SECONDS)
+            if rc != 0:
+                raise RuntimeError(f'scancel exited {rc}: {stderr}')
+            logger.warning('Cancelled orphaned Slurm allocation: '
+                           f'cluster={allocation["cluster_name"]}, '
+                           f'slurm_cluster={slurm_cluster}, '
+                           f'job_id={allocation["job_id"]}, '
+                           f'user={provider_config.get("slurm_user")}')
+            _ORPHANED_ALLOCATION_SEEN.discard(key)
+        except Exception as e:  # pylint: disable=broad-except
+            logger.warning('Failed to cancel orphaned Slurm allocation '
+                           f'{allocation["job_id"]} on {slurm_cluster}: '
+                           f'{common_utils.format_exception(e)}')
 
 
 def _record_nodes_allocated(cluster_name: str, slurm_cluster: str,
