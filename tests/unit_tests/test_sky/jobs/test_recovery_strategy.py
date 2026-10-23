@@ -869,7 +869,9 @@ async def test_resources_unavailable_is_not_an_unknown_error(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_a_user_cancel_ends_a_recovery_launch(monkeypatch):
+@pytest.mark.parametrize('raise_on_failure', [True, False])
+async def test_a_user_cancel_ends_a_recovery_launch(monkeypatch,
+                                                     raise_on_failure):
     """Recovery retries a failed launch forever; that would resubmit what the
     user cancelled, even beside a capacity failure elsewhere."""
     executor = _make_launch_executor()
@@ -884,7 +886,8 @@ async def test_a_user_cancel_ends_a_recovery_launch(monkeypatch):
     executor._await_launch_request = mock.AsyncMock(side_effect=[cancelled])
 
     with pytest.raises(exceptions.ProvisionPrechecksError):
-        await executor._launch(max_retry=None, raise_on_failure=False)
+        await executor._launch(max_retry=None,
+                               raise_on_failure=raise_on_failure)
 
 
 @pytest.mark.asyncio
