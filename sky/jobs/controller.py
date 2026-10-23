@@ -4567,23 +4567,8 @@ class ControllerManager:
             job_id = waiting_job['job_id']
             pool = waiting_job.get('pool', None)
 
-            cancels = os.listdir(jobs_constants.CONSOLIDATED_SIGNAL_PATH)
-            if str(job_id) in cancels:
-                status = await managed_job_state.get_status_async(job_id)
-                if status == managed_job_state.ManagedJobStatus.PENDING:
-                    logger.info(f'Job {job_id} cancelled')
-                    os.remove(f'{jobs_constants.CONSOLIDATED_SIGNAL_PATH}/'
-                              f'{job_id}')
-                    await managed_job_state.set_cancelling_async(
-                        job_id=job_id,
-                        callback_func=managed_job_utils.event_callback_func(
-                            job_id=job_id, task_id=None, task=None))
-                    await managed_job_state.set_cancelled_async(
-                        job_id=job_id,
-                        callback_func=managed_job_utils.event_callback_func(
-                            job_id=job_id, task_id=None, task=None))
-                    continue
-
+            # PENDING can follow a launch retry, so claimed jobs need cleanup.
+            # Only state.set_pending_cancelled can bypass the controller.
             await self.start_job(job_id, pool)
 
 
