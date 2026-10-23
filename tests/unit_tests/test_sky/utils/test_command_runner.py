@@ -1577,3 +1577,55 @@ class TestInlineCommandLimit:
         assert limit('ssh-other') == 20480
         # A real Kubernetes context still reads the kubernetes block.
         assert limit('gke-x') == 8192
+
+
+class TestSlurmContainerSetup:
+
+    @staticmethod
+    def _container_runner():
+        return command_runner.SlurmCommandRunner(
+            node=('login.example.com', 22),
+            ssh_user='root',
+            ssh_private_key=None,
+            sky_dir='/home/alice/.sky_clusters/test',
+            skypilot_runtime_dir='/tmp/test',
+            job_id='123',
+            slurm_node='node-1',
+            container_args='--container-name=test:exec')
+
+    @pytest.mark.parametrize('host_returncode', [0, 1])
+    def test_setup_runs_on_host_and_container_at_once(self, host_returncode):
+        runner = self._container_runner()
+        # Each side waits for the other, so running them in turn times out.
+        both_started = threading.Barrier(2, timeout=10)
+
+        def run_via_srun(cmd, in_container, **kwargs):
+            del cmd, kwargs
+            both_started.wait()
+            if in_container:
+                return 0, 'container', ''
+            return host_returncode, 'host', ''
+
+        with mock.patch.object(runner,
+                               '_run_via_srun',
+                               side_effect=run_via_srun):
+            result = runner.run_setup('true', require_outputs=True)
+
+        # A host failure is the setup's result; otherwise the container's is.
+        assert result[1] == ('host' if host_returncode else 'container')
+
+    def test_setup_files_sync_to_host_and_container_at_once(self):
+        runner = self._container_runner()
+        both_started = threading.Barrier(2, timeout=10)
+        targets = []
+
+        def rsync_via_srun(**kwargs):
+            both_started.wait()
+            targets.append(kwargs['in_container'])
+
+        with mock.patch.object(runner,
+                               '_rsync_via_srun',
+                               side_effect=rsync_via_srun):
+            runner.rsync_setup('/local', '/remote', up=True)
+
+        assert sorted(targets) == [False, True]

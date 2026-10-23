@@ -1,4 +1,6 @@
 """Runner for commands to be executed on the cluster."""
+from concurrent import futures
+import contextvars
 import enum
 import fcntl
 import hashlib
@@ -16,7 +18,7 @@ import termios
 import threading
 import time
 from typing import (Any, Callable, Dict, Iterable, List, Optional, Tuple, Type,
-                    Union)
+                    TypeVar, Union)
 import urllib.parse
 import uuid
 
@@ -41,6 +43,8 @@ from sky.utils import timeline
 from sky.utils.db import kv_cache
 
 logger = sky_logging.init_logger(__name__)
+
+_SetupResult = TypeVar('_SetupResult')
 
 # Global lock to serialize interactive SSH auth attempts from multiple
 # threads in a single request.
@@ -2502,19 +2506,34 @@ exec {ssh_command} srun --unbuffered --quiet --overlap {extra_srun_args}\\
         # Host only: driver uses srun internally to launch work in containers.
         return self._run_via_srun(cmd, in_container=False, **kwargs)
 
+    def _on_host_and_container(
+        self, operation: Callable[[bool], _SetupResult]
+    ) -> Tuple[_SetupResult, _SetupResult]:
+        """Run operation(in_container) on the host and in the container at once.
+
+        The two environments share no setup state.
+        Returns the host's and the container's results.
+        """
+        context = contextvars.copy_context()
+        with futures.ThreadPoolExecutor(max_workers=1) as pool:
+            container = pool.submit(context.run, operation, True)
+            host_result = operation(False)
+            container_result = container.result()
+        return host_result, container_result
+
     def run_setup(
         self,
         cmd: Union[str, List[str]],
         **kwargs,
     ) -> Union[int, Tuple[int, str, str]]:
         # Both host and container: ensure environment is consistent.
-        result = self._run_via_srun(cmd, in_container=False, **kwargs)
-        if self.container_args:
-            returncode = result if isinstance(result, int) else result[0]
-            if returncode != 0:
-                return result
-            result = self._run_via_srun(cmd, in_container=True, **kwargs)
-        return result
+        if not self.container_args:
+            return self._run_via_srun(cmd, in_container=False, **kwargs)
+        result, container_result = self._on_host_and_container(
+            lambda in_container: self._run_via_srun(
+                cmd, in_container=in_container, **kwargs))
+        returncode = result if isinstance(result, int) else result[0]
+        return result if returncode != 0 else container_result
 
     def rsync_driver(
         self,
@@ -2549,20 +2568,17 @@ exec {ssh_command} srun --unbuffered --quiet --overlap {extra_srun_args}\\
         timeout: Optional[int] = None,
     ) -> None:
         # Both host and container: ensure environment is consistent.
-        self._rsync_via_srun(source=source,
-                             target=target,
-                             up=up,
-                             in_container=False,
-                             log_path=log_path,
-                             stream_logs=stream_logs,
-                             max_retry=max_retry,
-                             timeout=timeout)
-        if self.container_args is not None:
+        def rsync(in_container: bool) -> None:
             self._rsync_via_srun(source=source,
                                  target=target,
                                  up=up,
-                                 in_container=True,
+                                 in_container=in_container,
                                  log_path=log_path,
                                  stream_logs=stream_logs,
                                  max_retry=max_retry,
                                  timeout=timeout)
+
+        if self.container_args is None:
+            rsync(False)
+        else:
+            self._on_host_and_container(rsync)
