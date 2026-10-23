@@ -3771,11 +3771,9 @@ class CloudVmRayBackend(backends.Backend['CloudVmRayResourceHandle']):
                 # from cluster_info.
                 handle.cached_cluster_info = cluster_info
                 handle.docker_user = cluster_info.docker_user
-                if runtime_metadata.ssh_available:
-                    handle.update_cluster_ips(
-                        max_attempts=_FETCH_IP_MAX_ATTEMPTS,
-                        cluster_info=cluster_info)
-                    handle.update_ssh_ports(max_attempts=_FETCH_IP_MAX_ATTEMPTS)
+                handle.update_cluster_ips(max_attempts=_FETCH_IP_MAX_ATTEMPTS,
+                                          cluster_info=cluster_info)
+                handle.update_ssh_ports(max_attempts=_FETCH_IP_MAX_ATTEMPTS)
 
                 # Update launched resources.
                 handle.launched_resources = handle.launched_resources.copy(
