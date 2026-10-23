@@ -2015,8 +2015,10 @@ srun() {{
             check=False)
 
         assert result.returncode == 0, result.stderr
-        apt_calls = apt_log.read_text().splitlines() if apt_log.exists() else []
-        assert apt_calls == expected_apt_calls
+        if not expected_apt_calls:
+            assert not apt_log.exists()
+        else:
+            assert apt_log.read_text().splitlines() == expected_apt_calls
 
     @patch('sky.provision.slurm.instance._wait_for_job_nodes')
     @patch('sky.provision.slurm.instance.slurm_utils.get_proctrack_type')
