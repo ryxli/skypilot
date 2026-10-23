@@ -4056,6 +4056,86 @@ class TestRunJobLoopTransientDbErrors:
         managed_job_state.finalize_job_done_async.assert_awaited_once_with(
             1, cancelling=True, callback_func=None)
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize('pool', [None, 'test-pool'])
+    @pytest.mark.parametrize('signal_content,graceful,timeout', [
+        ('', False, None),
+        ('graceful:30', True, 30),
+    ])
+    async def test_claimed_pending_cancel_reaches_cleanup(
+            self, manager, monkeypatch, tmp_path, pool, signal_content,
+            graceful, timeout):
+        signal = tmp_path / '1'
+        signal.write_text(signal_content, encoding='utf-8')
+        monkeypatch.setattr(jobs_constants, 'CONSOLIDATED_SIGNAL_PATH',
+                            str(tmp_path))
+        monkeypatch.setattr(jobs_constants, 'JOBS_CONTROLLER_LOGS_DIR',
+                            str(tmp_path / 'logs'))
+        monkeypatch.setattr(controller_module.metrics_lib, 'METRICS_ENABLED',
+                            False)
+        monkeypatch.setattr(controller_module.controller_utils,
+                            'get_number_of_jobs_controllers', lambda: 1)
+        monkeypatch.setattr(
+            managed_job_state, 'get_waiting_job_async',
+            AsyncMock(side_effect=[{
+                'job_id': 1,
+                'pool': pool,
+            }, asyncio.CancelledError()]))
+        monkeypatch.setattr(
+            managed_job_state, 'get_status_async',
+            AsyncMock(return_value=managed_job_state.ManagedJobStatus.PENDING))
+        monkeypatch.setattr(
+            managed_job_state, 'get_all_task_ids_statuses_async',
+            AsyncMock(
+                return_value=[(0, managed_job_state.ManagedJobStatus.PENDING)]))
+        running = asyncio.Event()
+        background = []
+
+        async def run():
+            running.set()
+            await asyncio.Future()
+
+        async def schedule(coro):
+            task = asyncio.create_task(coro)
+            background.append(task)
+            return task
+
+        controller_module.JobController.return_value.run.side_effect = run
+        monkeypatch.setattr(controller_module, 'create_background_task',
+                            schedule)
+        try:
+            with pytest.raises(asyncio.CancelledError):
+                await manager.monitor_loop()
+            assert signal.exists()
+            assert len(background) == 1
+            await asyncio.wait_for(running.wait(), timeout=5)
+            with patch.object(
+                    asyncio,
+                    'sleep',
+                    new=AsyncMock(side_effect=asyncio.CancelledError())):
+                with pytest.raises(asyncio.CancelledError):
+                    await manager.cancel_job()
+            with pytest.raises(asyncio.CancelledError):
+                await background[0]
+        finally:
+            for task in background:
+                task.cancel()
+            await asyncio.gather(*background, return_exceptions=True)
+
+        assert not signal.exists()
+        manager._cleanup.assert_awaited_once()
+        cleanup = manager._cleanup.await_args
+        assert cleanup.args == (1,)
+        assert cleanup.kwargs['pool'] == pool
+        assert cleanup.kwargs['graceful'] is graceful
+        assert cleanup.kwargs['graceful_timeout'] == timeout
+        managed_job_state.set_cancelling_async.assert_awaited_once()
+        managed_job_state.set_failed_async.assert_not_awaited()
+        managed_job_state.finalize_job_done_async.assert_awaited_once_with(
+            1, cancelling=True, callback_func=None)
+        assert 1 not in manager.job_tasks
+        assert 1 not in manager.starting
+
 
 class TestCancelDynamicMembers:
     """Only a tree root sweeps the jobs launched under it, and only once."""
