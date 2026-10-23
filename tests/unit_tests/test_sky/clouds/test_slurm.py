@@ -1951,6 +1951,9 @@ srun() {{
                                      mock_get_proctrack_type,
                                      mock_wait_for_job_nodes):
         """Test that sbatch provision script for containers is correct."""
+        self._setup_mocks(mock_ssh_runner, mock_slurm_client,
+                          mock_get_partition_info, 'gpu')
+        mock_get_proctrack_type.return_value = 'cgroup'
         config = self._make_container_config()
 
         written_script = self._run_and_capture_script('test-cluster', config)
