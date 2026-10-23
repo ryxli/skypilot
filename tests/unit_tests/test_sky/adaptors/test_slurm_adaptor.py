@@ -189,6 +189,22 @@ class TestRunCommand:
         assert mock_run.call_args.kwargs['timeout'] == 9
 
 
+class TestCancelJob:
+    """Tests for allocation-ID cancellation."""
+
+    def test_cancel_job_uses_owner_command_argv(self):
+        client = slurm.SlurmClient(ssh_host='localhost',
+                                   ssh_port=22,
+                                   ssh_user='root',
+                                   ssh_key=None)
+        with mock.patch.object(client,
+                               '_run_slurm_cmd',
+                               return_value=(0, '', '')) as run:
+            client.cancel_job('17269', timeout=30)
+        # argv runs as the allocation owner; a shell string would run as the SSH user.
+        run.assert_called_once_with(['scancel', '17269'], timeout=30)
+
+
 class TestJobSteps:
     """Tests for querying and signalling Slurm job steps."""
 
