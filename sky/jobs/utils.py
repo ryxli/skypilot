@@ -1131,9 +1131,10 @@ def terminate_leaked_job_clusters() -> None:
         logger.info(f'Managed job {job_id} is done but its cluster '
                     f'{cluster_name} still exists. Terminating it.')
         try:
-            terminate_cluster(cluster_name)
+            # The next sweep is the retry: retrying here with backoff would hold
+            # up the other clusters for minutes per failing one.
+            terminate_cluster(cluster_name, max_retry=1)
         except Exception as e:  # pylint: disable=broad-except
-            # The next sweep retries it.
             logger.warning(f'Failed to terminate cluster {cluster_name}: '
                            f'{common_utils.format_exception(e)}')
 

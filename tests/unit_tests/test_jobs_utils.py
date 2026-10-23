@@ -1712,7 +1712,9 @@ def test_terminate_leaked_job_clusters_tears_down_done_jobs_only():
     managed = ['train-1', 'eval-2', 'workers-3', 'other-4', 'sweep-5']
     terminated = []
 
-    def terminate(cluster_name):
+    def terminate(cluster_name, max_retry):
+        # The next pass retries; a failing cluster must not hold up the rest.
+        assert max_retry == 1
         terminated.append(cluster_name)
         if cluster_name == 'sweep-5':
             raise RuntimeError('teardown failed')
