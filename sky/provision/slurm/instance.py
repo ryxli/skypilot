@@ -44,6 +44,8 @@ SNAPSHOT_GENERATIONS_DIRECTORY_NAME = 'generations'
 SNAPSHOT_MANIFEST_VERSION = 1
 _CONTAINER_KEEPER_STEP_NAME = 'sky-container-keeper'
 _SKYLET_KEEPER_STEP_NAME = 'sky-skylet-keeper'
+_DOCKER_HUB_DOMAINS = frozenset(
+    {'docker.io', 'index.docker.io', 'registry-1.docker.io'})
 
 
 def _sbatch_log_path(base_dir: str, job_id: str) -> str:
@@ -1308,6 +1310,8 @@ def _create_virtual_instance(
     # For non-Docker Hub registries, pyxis/enroot requires '#' separator
     # between registry and path. See:
     # https://github.com/NVIDIA/pyxis/wiki/Usage#registry-syntax
+    # A Docker Hub image is given without a registry: enroot 4.0 takes
+    # `docker.io#` literally and fails to fetch its manifest.
     container_image = resources.get('image_id')
     if snapshot_manifest is not None:
         if container_image is None:
@@ -1327,10 +1331,10 @@ def _create_virtual_instance(
             parts = container_image.split('/', 1)
             if len(parts) > 1:
                 maybe_domain, maybe_path = parts
-                is_custom_registry = ('.' in maybe_domain or
-                                      ':' in maybe_domain or
-                                      maybe_domain == 'localhost')
-                if is_custom_registry:
+                if maybe_domain in _DOCKER_HUB_DOMAINS:
+                    container_image = maybe_path
+                elif ('.' in maybe_domain or ':' in maybe_domain or
+                      maybe_domain == 'localhost'):
                     container_image = f'{maybe_domain}#{maybe_path}'
     container_name = slurm_utils.pyxis_container_name(cluster_name_on_cloud)
 
