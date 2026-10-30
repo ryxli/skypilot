@@ -1713,6 +1713,39 @@ class TestCreateVirtualInstance:
             self._run_and_capture_script('test-cluster', config)
         mock_slurm_client.return_value.submit_job.assert_not_called()
 
+    @pytest.mark.parametrize('image_id, pyxis_image', [
+        ('docker.io/nvidia/cuda@sha256:' + 'a' * 64,
+         'nvidia/cuda@sha256:' + 'a' * 64),
+        ('registry-1.docker.io/library/ubuntu:24.04', 'library/ubuntu:24.04'),
+        ('nvcr.io/nvidia/pytorch:26.02-py3',
+         'nvcr.io#nvidia/pytorch:26.02-py3'),
+        ('localhost:5000/team/app:1', 'localhost:5000#team/app:1'),
+        ('nvidia/cuda:12.4', 'nvidia/cuda:12.4'),
+    ])
+    @patch('sky.provision.slurm.instance._wait_for_job_nodes')
+    @patch('sky.provision.slurm.instance.slurm_utils.get_proctrack_type')
+    @patch('sky.provision.slurm.instance.slurm_utils.get_partition_info')
+    @patch('sky.provision.slurm.instance.slurm.SlurmClient')
+    @patch('sky.provision.slurm.instance.command_runner.'
+           'SlurmLoginNodeCommandRunner')
+    def test_container_image_registry_syntax(self, mock_ssh_runner,
+                                             mock_slurm_client,
+                                             mock_get_partition_info,
+                                             mock_get_proctrack_type,
+                                             mock_wait_for_job_nodes, image_id,
+                                             pyxis_image):
+        """Docker Hub images reach pyxis without a registry, others with #."""
+        del mock_wait_for_job_nodes
+        self._setup_mocks(mock_ssh_runner, mock_slurm_client,
+                          mock_get_partition_info, 'cpus')
+        mock_get_proctrack_type.return_value = 'cgroup'
+        config = self._make_non_container_config(1)
+        config.node_config['image_id'] = image_id
+
+        script = self._run_and_capture_script('test-cluster', config)
+
+        assert f'--container-image={shlex.quote(pyxis_image)} ' in script
+
     @pytest.mark.parametrize('old_image', ['ubuntu:24.04', 'debian:12'])
     @patch('sky.provision.slurm.instance._read_snapshot_manifest')
     @patch('sky.provision.slurm.instance._wait_for_job_nodes')
