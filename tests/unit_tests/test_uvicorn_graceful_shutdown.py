@@ -27,10 +27,13 @@ def _make_server() -> sky_uvicorn.Server:
 
 
 def _patch_fast(monkeypatch) -> None:
-    # Skip the real sleeps and the block-requests side effect.
+    # Skip the real sleeps, the block-requests side effect and the stop of
+    # this host's job controllers.
     monkeypatch.setattr(sky_uvicorn.time, 'sleep', lambda *_a, **_k: None)
     monkeypatch.setattr(sky_uvicorn.state, 'set_block_requests',
                         lambda *_a, **_k: None)
+    monkeypatch.setattr(managed_job_scheduler, 'stop_local_job_controllers',
+                        lambda **_k: None)
 
 
 def test_graceful_shutdown_exits_when_backend_unreachable(monkeypatch):
@@ -92,6 +95,94 @@ def draining(monkeypatch, tmp_path):
     monkeypatch.setattr(managed_job_scheduler, 'runs_local_controller_pool',
                         lambda: True)
     return path
+
+
+def _patch_requests(monkeypatch, on_going, launches) -> None:
+    """Sets the on-going (request_id, name) pairs, one list per look, and
+    which of the launches (request_id -> bool) a job controller submitted."""
+    backend = mock.Mock()
+    backend.get_shutdown_active_requests.side_effect = on_going
+    monkeypatch.setattr(sky_uvicorn.request_storage, 'get_request_backend',
+                        lambda: backend)
+    records = []
+    for request_id, by_controller in launches.items():
+        record = mock.Mock(request_id=request_id)
+        record.request_body.is_launched_by_jobs_controller = by_controller
+        records.append(record)
+    monkeypatch.setattr(
+        sky_uvicorn.requests_lib, 'get_request_tasks', lambda request_filter: [
+            record for record in records
+            if record.request_id in request_filter.request_ids
+        ])
+
+
+@pytest.mark.parametrize('is_draining,by_controller,waited',
+                         [(True, True, False), (True, False, True),
+                          (False, True, True)])
+def test_shutdown_does_not_wait_for_draining_controllers_launches(
+        monkeypatch, draining, is_draining, by_controller, waited):
+    """Such a launch ends only with its controller, which the server stops
+    after the wait: waiting for it always took the whole grace period."""
+    if is_draining:
+        draining.touch()
+    server = _make_server()
+    _patch_requests(monkeypatch,
+                    on_going=[[('launch-1', 'sky.launch')], []],
+                    launches={'launch-1': by_controller})
+    pauses = []
+    monkeypatch.setattr(sky_uvicorn.time, 'sleep', pauses.append)
+    interrupt = mock.Mock()
+    monkeypatch.setattr(server, 'interrupt_request_for_retry', interrupt)
+
+    server._wait_requests()  # pylint: disable=protected-access
+
+    assert bool(pauses) is waited
+    interrupt.assert_not_called()
+
+
+def test_shutdown_stops_job_controllers_then_their_launches(
+        monkeypatch, draining):
+    """A live controller reads an interrupted launch as a failed one."""
+    draining.touch()
+    server = _make_server()
+    _patch_requests(monkeypatch,
+                    on_going=[[('of-controller', 'sky.launch'),
+                               ('of-user', 'sky.launch'),
+                               ('status', 'sky.status')]],
+                    launches={
+                        'of-controller': True,
+                        'of-user': False
+                    })
+    calls = []
+    monkeypatch.setattr(managed_job_scheduler, 'stop_local_job_controllers',
+                        lambda **_k: calls.append('controllers'))
+    monkeypatch.setattr(
+        server, 'interrupt_request_for_retry',
+        lambda request_id, should_retry: calls.append(
+            (request_id, should_retry)))
+
+    server._stop_job_controllers()  # pylint: disable=protected-access
+
+    assert calls == ['controllers', ('of-controller', False)]
+
+
+def test_shutdown_keeps_launches_of_controllers_it_could_not_stop(
+        monkeypatch, draining):
+    draining.touch()
+    server = _make_server()
+    _patch_fast(monkeypatch)
+    _patch_requests(monkeypatch,
+                    on_going=[[('of-controller', 'sky.launch')]] * 2,
+                    launches={'of-controller': True})
+    monkeypatch.setattr(managed_job_scheduler, 'stop_local_job_controllers',
+                        mock.Mock(side_effect=RuntimeError('still running')))
+    interrupt = mock.Mock()
+    monkeypatch.setattr(server, 'interrupt_request_for_retry', interrupt)
+
+    server._graceful_shutdown(signal.SIGTERM, None)  # pylint: disable=protected-access
+
+    interrupt.assert_not_called()
+    assert server.should_exit is True
 
 
 def test_main_process_exit_drains_job_controllers(monkeypatch, draining):
