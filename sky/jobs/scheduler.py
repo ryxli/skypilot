@@ -247,6 +247,33 @@ def kill_local_job_controllers(sig: int = signal.SIGTERM) -> int:
     return signaled
 
 
+def runs_local_controller_pool() -> bool:
+    """Whether this API server runs this host's job controller pool.
+
+    Only a consolidation-mode API server does. A local API server started by a
+    jobs controller (the local server of a standalone controller cluster, via
+    sdk.api_start) inherits OVERRIDE_CONSOLIDATION_MODE, so
+    is_consolidation_mode() is true there too, but skylet owns that pool:
+    controllers this server started would inherit IS_SKYPILOT_SERVER and never
+    restart it if it died. start_controller() exports the variable only in the
+    controller's command, never in the consolidation-mode API server's own
+    environment.
+    """
+    if os.environ.get(constants.OVERRIDE_CONSOLIDATION_MODE) is not None:
+        return False
+    return managed_job_utils.is_consolidation_mode()
+
+
+def drain_local_job_controllers() -> None:
+    """Stop this host's job controllers from claiming new jobs.
+
+    For an API server that starts shutting down; see
+    managed_job_constants.CONTROLLERS_DRAINING_PATH.
+    """
+    if runs_local_controller_pool():
+        pathlib.Path(managed_job_constants.CONTROLLERS_DRAINING_PATH).touch()
+
+
 def maybe_start_controllers(
         from_scheduler: bool = False,
         still_owned: Optional[Callable[[], bool]] = None) -> None:

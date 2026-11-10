@@ -21,6 +21,7 @@ from uvicorn.supervisors import multiprocess
 
 from sky import exceptions
 from sky import sky_logging
+from sky.jobs import scheduler as managed_job_scheduler
 from sky.server import constants as server_constants
 from sky.server import daemons
 from sky.server import metrics as metrics_lib
@@ -156,6 +157,10 @@ class Server(uvicorn.Server):
         super().__init__(config=config)
         self.exiting: bool = False
         self.max_db_connections = max_db_connections
+        # True when this server runs in the API server's main process (a single
+        # worker), the process that runs the host's job controller pool. Worker
+        # processes also exit when the supervisor restarts them.
+        self.is_main_process: bool = False
 
     def handle_exit(self, sig: int, frame: Union[FrameType, None]) -> None:
         """Handle exit signal.
@@ -173,6 +178,8 @@ class Server(uvicorn.Server):
             return
         if not self.exiting:
             self.exiting = True
+            if self.is_main_process:
+                _drain_job_controllers()
             # Perform graceful shutdown in a separate thread to avoid blocking
             # the main thread.
             threading.Thread(target=self._graceful_shutdown,
@@ -417,6 +424,7 @@ def run(config: uvicorn.Config, max_db_connections: Optional[int] = None):
             SlowStartMultiprocess(config, target=server.run,
                                   sockets=sockets).run()
         else:
+            server.is_main_process = True
             server.run()
     finally:
         # Copied from unvicorn.run()
@@ -465,7 +473,21 @@ class SlowStartMultiprocess(multiprocess.Multiprocess):
                                               should_exit=self.should_exit)
 
     def terminate_all(self) -> None:
-        """Wait init thread to finish before terminating all processes."""
+        """Wait init thread to finish before terminating all processes.
+
+        Only called when the API server exits; restarts terminate one by one.
+        """
+        _drain_job_controllers()
         if self._init_thread is not None:
             self._init_thread.join()
         super().terminate_all()
+
+
+def _drain_job_controllers() -> None:
+    """Stop the job controllers of an exiting API server from claiming jobs."""
+    try:
+        managed_job_scheduler.drain_local_job_controllers()
+    except OSError:
+        # The server must still exit; its controllers then keep claiming
+        # until they are stopped, as before draining existed.
+        logger.exception('Failed to drain the job controllers')

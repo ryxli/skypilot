@@ -10,8 +10,11 @@ import signal
 from unittest import mock
 
 import filelock
+import pytest
 import uvicorn
 
+from sky.jobs import constants as managed_job_constants
+from sky.jobs import scheduler as managed_job_scheduler
 from sky.server import uvicorn as sky_uvicorn
 
 
@@ -78,3 +81,42 @@ def test_graceful_shutdown_exits_when_coordinator_lock_times_out(monkeypatch):
     server._graceful_shutdown(signal.SIGTERM, None)  # pylint: disable=protected-access
 
     assert server.should_exit is True
+
+
+@pytest.fixture
+def draining(monkeypatch, tmp_path):
+    """The drain mark of a server that runs the host's controller pool."""
+    path = tmp_path / 'job_controllers_draining'
+    monkeypatch.setattr(managed_job_constants, 'CONTROLLERS_DRAINING_PATH',
+                        str(path))
+    monkeypatch.setattr(managed_job_scheduler, 'runs_local_controller_pool',
+                        lambda: True)
+    return path
+
+
+def test_main_process_exit_drains_job_controllers(monkeypatch, draining):
+    """A single-process server's exit stops its controllers from claiming; a
+    worker exit does not, since the supervisor also restarts workers."""
+    monkeypatch.setattr(sky_uvicorn.threading, 'Thread', mock.Mock())
+
+    worker = _make_server()
+    worker.handle_exit(signal.SIGTERM, None)
+    assert not draining.exists()
+
+    main = _make_server()
+    main.is_main_process = True
+    main.handle_exit(signal.SIGTERM, None)
+    assert draining.exists()
+
+
+def test_supervisor_exit_drains_job_controllers(monkeypatch, draining):
+    # Keep the supervisor from replacing pytest's signal handlers.
+    monkeypatch.setattr(signal, 'signal', lambda *_a: None)
+    supervisor = sky_uvicorn.SlowStartMultiprocess(uvicorn.Config(
+        app=_dummy_app, workers=2),
+                                                   target=lambda sockets: None,
+                                                   sockets=[])
+
+    supervisor.terminate_all()
+
+    assert draining.exists()
