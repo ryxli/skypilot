@@ -140,9 +140,12 @@ def test_shutdown_does_not_wait_for_draining_controllers_launches(
     interrupt.assert_not_called()
 
 
+@pytest.mark.parametrize('wait_deadline,cancel_record_timeout', [(1040.0, 40.0),
+                                                                 (990.0, 0.0)])
 def test_shutdown_stops_job_controllers_then_their_launches(
-        monkeypatch, draining):
-    """A live controller reads an interrupted launch as a failed one."""
+        monkeypatch, draining, wait_deadline, cancel_record_timeout):
+    """A live controller reads an interrupted launch as a failed one. A cancel
+    gets what is left of the time requests get to finish."""
     draining.touch()
     server = _make_server()
     _patch_requests(monkeypatch,
@@ -154,16 +157,28 @@ def test_shutdown_stops_job_controllers_then_their_launches(
                         'of-user': False
                     })
     calls = []
-    monkeypatch.setattr(managed_job_scheduler, 'stop_local_job_controllers',
-                        lambda **_k: calls.append('controllers'))
+    monkeypatch.setattr(
+        managed_job_scheduler, 'stop_local_job_controllers',
+        lambda cancel_record_timeout_seconds: calls.append(
+            ('controllers', cancel_record_timeout_seconds)))
     monkeypatch.setattr(
         server, 'interrupt_request_for_retry',
         lambda request_id, should_retry: calls.append(
             (request_id, should_retry)))
+    monkeypatch.setattr(sky_uvicorn.time, 'time', lambda: 1000.0)
 
-    server._stop_job_controllers()  # pylint: disable=protected-access
+    server._stop_job_controllers(wait_deadline)  # pylint: disable=protected-access
 
-    assert calls == ['controllers', ('of-controller', False)]
+    assert calls == [('controllers', cancel_record_timeout),
+                     ('of-controller', False)]
+
+
+def test_wait_for_requests_ends_before_the_grace_period():
+    """The process is killed when the grace period ends, so the exit that
+    follows the wait needs a part of it."""
+    grace_period = sky_uvicorn.server_constants.GRACE_PERIOD_SECONDS
+    # pylint: disable=protected-access
+    assert 0 < sky_uvicorn._WAIT_REQUESTS_TIMEOUT_SECONDS < grace_period
 
 
 def test_shutdown_keeps_launches_of_controllers_it_could_not_stop(
