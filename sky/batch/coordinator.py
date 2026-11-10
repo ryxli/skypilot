@@ -200,9 +200,7 @@ class BatchCoordinator:
             logger.info(f'managed_job_id={self._managed_job_id}')
             self._resolve_formats()
 
-            if self._is_resume:
-                self._resume_from_db()
-            else:
+            if not (self._is_resume and self._resume_from_db()):
                 self._count_and_split()
                 if not self.batches:
                     logger.info('No items in dataset — nothing to do.')
@@ -289,18 +287,24 @@ class BatchCoordinator:
         managed_job_state.save_batch_states(self._managed_job_id, self.batches)
         logger.info(f'Saved {len(self.batches)} batch records to DB')
 
-    def _resume_from_db(self) -> None:
+    def _resume_from_db(self) -> bool:
         """Restore coordinator state from DB after a controller crash.
 
         Resets any DISPATCHED (in-flight) batches back to PENDING, then
         rebuilds in-memory state from the persisted records.
+
+        Returns:
+            False if the job has no batch records to resume from.
         """
         managed_job_state.reset_dispatched_batches(self._managed_job_id)
         records = managed_job_state.get_batch_states(self._managed_job_id)
         if not records:
-            raise RuntimeError(
-                f'No batch records found for job {self._managed_job_id} '
-                'during resume. The job may need to be re-submitted.')
+            # The batches are saved in one transaction before any is
+            # dispatched, so the previous controller stopped before
+            # dispatching anything (e.g. while counting the dataset).
+            logger.info(f'No batch records for job {self._managed_job_id}; '
+                        'starting it from the beginning.')
+            return False
 
         self.batches = []
         self.pending_batches = collections.deque()
@@ -327,6 +331,7 @@ class BatchCoordinator:
         logger.info(f'BATCH_RESUME total={len(self.batches)} '
                     f'completed={self.completed_count} '
                     f'pending={len(self.pending_batches)}')
+        return True
 
     def _shutdown_stale_workers(self) -> None:
         """Shut down any stale worker services on discovered workers.
