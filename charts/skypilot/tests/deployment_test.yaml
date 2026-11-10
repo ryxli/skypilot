@@ -1076,6 +1076,15 @@ tests:
           content:
             name: logrotate
 
+  - it: should let the logrotate sidecar exit on SIGTERM
+    set:
+      apiService.serveServerLog: true
+      apiService.logs.retention.enabled: true
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.containers[1].args[0]
+          pattern: "^trap 'exit 0' TERM"
+
   - it: should not include logrotate sidecar when serveServerLog is false
     set:
       apiService.serveServerLog: false

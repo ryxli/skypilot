@@ -485,13 +485,18 @@ spec:
       - name: logrotate
         image: {{ include "common.image" (dict "root" . "image" .Values.apiService.image) }}
         command: ["/bin/sh", "-c"]
-        # Warn if logrotate is missing in the image and keep the sidecar running
+        # Warn if logrotate is missing in the image and keep the sidecar running.
+        # As PID 1 the shell ignores a SIGTERM it has no handler for, which
+        # would keep the pod for its whole grace period. The handler runs once
+        # the command the shell waits for returns, hence the background sleeps.
         args:
         - |
+          trap 'exit 0' TERM
           if ! command -v logrotate >/dev/null 2>&1; then
             echo "warning: logrotate not found; skipping log retention" >&2
             while true; do
-              sleep 3600
+              sleep 3600 &
+              wait $!
             done
           fi
           set -x
@@ -506,7 +511,8 @@ spec:
           EOF
           while true; do
             logrotate -s /var/lib/logrotate/status /etc/logrotate.conf
-            sleep 60;
+            sleep 60 &
+            wait $!
           done
         volumeMounts:
         {{- if and $statePersist (eq .Values.apiService.upgradeStrategy "RollingUpdate") }}
