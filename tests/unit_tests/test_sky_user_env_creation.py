@@ -9,6 +9,7 @@ import os
 import pathlib
 import shutil
 import subprocess
+import sys
 import time
 from typing import Dict, List, Optional
 
@@ -194,3 +195,61 @@ def test_skipped_without_python3(fake_home, tmp_path):
     assert proc.returncode == 0, proc.stderr
     assert not _env_dir(fake_home).exists()
     assert not _uv_calls(fake_home)
+
+
+def test_runtime_uv_pip_ignores_workload_python_selection(tmp_path):
+    """Runtime uv commands must not let a workload UV_PYTHON choose its env."""
+    uv = shutil.which('uv')
+    assert uv is not None
+
+    home = tmp_path / 'home'
+    runtime_dir = tmp_path / 'runtime'
+    runtime_env = runtime_dir / constants.SKY_REMOTE_PYTHON_ENV_NAME
+    workload_env = tmp_path / 'workload'
+    for env_dir in (runtime_env, workload_env):
+        subprocess.run([sys.executable, '-m', 'venv', str(env_dir)], check=True)
+    for env_dir, name in ((runtime_env, 'runtime-marker'), (workload_env,
+                                                            'workload-marker')):
+        site_packages = subprocess.check_output([
+            str(env_dir / 'bin' / 'python'), '-c',
+            'import site; print(site.getsitepackages()[0])'
+        ],
+                                                text=True).strip()
+        marker = pathlib.Path(
+            site_packages) / f'{name.replace("-", "_")}-0.0.dist-info'
+        marker.mkdir()
+        (marker / 'METADATA').write_text(f'Name: {name}\nVersion: 0.0\n')
+    workload_config = (workload_env / 'pyvenv.cfg').read_text()
+
+    uv_path = home / '.local' / 'bin' / 'uv'
+    uv_path.parent.mkdir(parents=True)
+    uv_path.symlink_to(uv)
+    env = os.environ.copy()
+    env.update({
+        'HOME': str(home),
+        'SKY_RUNTIME_DIR': str(runtime_dir),
+        'VIRTUAL_ENV': str(workload_env),
+        'UV_PYTHON': str(workload_env / 'bin' / 'python'),
+        'UV_SYSTEM_PYTHON': 'false',
+    })
+    proc = subprocess.run(
+        ['bash', '-c', f'{constants.SKY_UV_PIP_CMD} list --offline'],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False)
+
+    assert proc.returncode == 0, proc.stderr
+    assert 'runtime-marker' in proc.stdout
+    assert 'workload-marker' not in proc.stdout
+    assert (workload_env / 'pyvenv.cfg').read_text() == workload_config
+    proc = subprocess.run([
+        'bash', '-c', f'{constants.SKY_UV_RUN_CMD} --offline python -c '
+        '"import sys; print(sys.prefix)"'
+    ],
+                          env=env,
+                          capture_output=True,
+                          text=True,
+                          check=False)
+    assert proc.returncode == 0, proc.stderr
+    assert pathlib.Path(proc.stdout.strip()).resolve() == runtime_env.resolve()
