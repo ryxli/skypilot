@@ -44,6 +44,11 @@ class KubernetesRdmaMode(enum.Enum):
     # virtual functions, requested as an extended resource and attached by
     # Multus.
     SRIOV = 'sriov'
+    # Share the node's network namespace; every RDMA device on the node
+    # arrives through one extended resource advertised by a shared-device
+    # plugin (k8s-rdma-shared-dev-plugin), not a privileged hostPath. Declared
+    # per context: no node label identifies such a cluster.
+    SHARED_DEVICE = 'shared_device'
 
 
 class KubernetesAutoscalerType(enum.Enum):

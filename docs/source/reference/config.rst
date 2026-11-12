@@ -2451,9 +2451,11 @@ How RDMA NICs are delivered to pods on an RDMA-capable cluster (optional).
 
 .. note::
 
-    This setting currently applies **only to Oracle OKE RoCE clusters** — those
-    that SkyPilot detects as OCI RoCE when a task requests
+    ``mode: sriov`` currently applies **only to Oracle OKE RoCE clusters** —
+    those that SkyPilot detects as OCI RoCE when a task requests
     :ref:`network_tier: best <yaml-spec-resources-network-tier>`.
+    ``mode: shared_device`` applies to any context that declares it and has no
+    detected high-performance network type of its own.
 
 Oracle documents two ways for a pod to reach the RDMA fabric on OKE, and a
 cluster is set up for one of them:
@@ -2466,11 +2468,26 @@ cluster is set up for one of them:
   SR-IOV virtual functions, requested as an extended resource and attached by
   Multus. Select it with ``mode: sriov``.
 
+A third model covers clusters that run a shared RDMA device plugin
+(``k8s-rdma-shared-dev-plugin``) and that SkyPilot cannot detect from node
+labels:
+
+- **Shared device**. The pod shares the node's network namespace, and every
+  RDMA device on the node arrives through one extended resource, with no
+  privileged container. Select it with ``mode: shared_device``. It takes effect
+  only for a task that requests accelerators and
+  :ref:`network_tier: best <yaml-spec-resources-network-tier>`; SkyPilot then
+  enables host networking, requests one unit of ``resource`` and adds the
+  ``IPC_LOCK`` capability. Declaring it also makes ``network_tier: best``
+  valid on that context.
+
 Fields:
 
-- ``mode``: ``sriov`` to use the SR-IOV model. Unset means host networking.
+- ``mode``: ``sriov`` or ``shared_device``. Unset means host networking through
+  a ``/dev/infiniband`` hostPath.
 - ``resource``: the extended resource advertised by the RDMA device plugin,
-  e.g. ``nvidia.com/rdma-vf``. Required when ``mode: sriov``.
+  e.g. ``nvidia.com/rdma-vf`` or ``rdma/rdma_shared_device_ib``. Required when
+  ``mode`` is set.
 - ``networks``: the ``NetworkAttachmentDefinition`` to attach, named the way
   Multus expects — either ``<name>`` (looked up in the pod's namespace) or
   ``<namespace>/<name>``, e.g. ``default/rdma-vf``. Required when

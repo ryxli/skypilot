@@ -489,7 +489,12 @@ class Kubernetes(clouds.Cloud):
                     # Allow custom network tier if supported by the cluster
                     # (e.g., Nebius clusters with high performance networking)
                     network_type, _ = network_future.result()
-                    if network_type.supports_high_performance_networking():
+                    shared_device = (
+                        kubernetes_enums.KubernetesRdmaMode.SHARED_DEVICE)
+                    declared_mode = cls._resolve_rdma_mode(
+                        context, oci_roce_enabled=False)
+                    if (network_type.supports_high_performance_networking() or
+                            declared_mode == shared_device):
                         unsupported_features.pop(
                             clouds.CloudImplementationFeatures.
                             CUSTOM_NETWORK_TIER, None)
@@ -1189,6 +1194,16 @@ class Kubernetes(clouds.Cloud):
         # to change with the delivery model.
         rdma_mode = self._resolve_rdma_mode(context, oci_roce_enabled)
         sriov_mode = (rdma_mode == kubernetes_enums.KubernetesRdmaMode.SRIOV)
+        # Declared rather than detected, so it is also opt-in per task: only a
+        # GPU task asking for network_tier: best is put on the host network
+        # and given the shared device. Skipped where a detected network type
+        # already delivers its own NICs, so a tenant-wide declaration cannot
+        # double up on those contexts.
+        shared_device_mode = (
+            rdma_mode == kubernetes_enums.KubernetesRdmaMode.SHARED_DEVICE and
+            network_type == KubernetesHighPerformanceNetworkType.NONE and
+            resources.network_tier == resources_utils.NetworkTier.BEST and
+            bool(acc_count))
 
         k8s_efa_count = None
         if network_type == KubernetesHighPerformanceNetworkType.AWS_EFA:
@@ -1413,6 +1428,9 @@ class Kubernetes(clouds.Cloud):
             k8s_host_network = bool(pod_config_host_network)
         elif sriov_mode:
             k8s_host_network = False
+        elif shared_device_mode:
+            # RoCE queue pairs need the rail NICs in the pod's namespace.
+            k8s_host_network = True
         else:
             k8s_host_network = oci_roce_enabled
 
@@ -1492,6 +1510,27 @@ class Kubernetes(clouds.Cloud):
             # One attachment per VF, matching the resource count.
             k8s_rdma_networks = ','.join([k8s_rdma_networks] *
                                          k8s_rdma_nic_count)
+
+        if shared_device_mode:
+            k8s_rdma_nic_resource = skypilot_config.get_effective_region_config(
+                cloud=cloud_config_str,
+                region=context,
+                keys=('rdma', 'resource'),
+                default_value=None)
+            if not k8s_rdma_nic_resource:
+                with ux_utils.print_exception_no_traceback():
+                    shared_device = (
+                        kubernetes_enums.KubernetesRdmaMode.SHARED_DEVICE)
+                    raise ValueError(
+                        f'kubernetes.rdma.mode is {shared_device.value!r} for '
+                        f'context {context!r}, but rdma.resource is not set. '
+                        'It names the extended resource the shared-device '
+                        'plugin advertises (e.g. '
+                        '"rdma/rdma_shared_device_ib"), which SkyPilot '
+                        'cannot infer.')
+            # One request exposes every RDMA device on the node, so it does
+            # not scale with the GPUs requested.
+            k8s_rdma_nic_count = 1
 
         if k8s_host_network:
             # The port values themselves are written into the pod spec per pod
@@ -1649,8 +1688,9 @@ class Kubernetes(clouds.Cloud):
         else:
             deploy_vars['k8s_enable_gpudirect_rdma_a4'] = False
 
+        # RDMA memory registration pins pages, whichever way the devices came.
         deploy_vars['k8s_ipc_lock_capability'] = (
-            network_type.requires_ipc_lock_capability())
+            network_type.requires_ipc_lock_capability() or shared_device_mode)
 
         # Superseded by k8s_rdma_host_device_access, which is what the
         # template now gates the privileged container and the /dev/infiniband
@@ -2132,7 +2172,7 @@ class Kubernetes(clouds.Cloud):
         Unset keeps the historical behavior, so this is additive: only a
         context that declares a mode sees any change.
 
-        Scoped to the one network type whose NIC delivery it describes,
+        SR-IOV is scoped to the network type whose NIC delivery it describes,
         matching how every other per-cloud NIC injection is gated (AWS EFA,
         CoreWeave and Together). A tenant-wide ``kubernetes.rdma`` therefore
         applies only where it is meaningful instead of failing launches on the
@@ -2140,10 +2180,9 @@ class Kubernetes(clouds.Cloud):
         landing on a cluster it does not describe is the intended case, not a
         problem to report on every launch. The mechanism itself -- an SR-IOV
         device plugin plus Multus -- is not OCI-specific, so widening this is
-        moving the check below.
+        moving the check below. A shared device is returned wherever it is
+        declared; the caller decides whether it applies to the task.
         """
-        if not oci_roce_enabled:
-            return None
         mode = skypilot_config.get_effective_region_config(
             cloud=cls._REPR.lower(),
             region=context,
@@ -2151,7 +2190,14 @@ class Kubernetes(clouds.Cloud):
             default_value=None)
         if mode is None:
             return None
-        return kubernetes_enums.KubernetesRdmaMode(mode.lower())
+        rdma_mode = kubernetes_enums.KubernetesRdmaMode(mode.lower())
+        # A shared device is declared for the context itself -- nothing on the
+        # nodes identifies such a cluster -- so it is not scoped to a detected
+        # network type the way SR-IOV is.
+        if (rdma_mode == kubernetes_enums.KubernetesRdmaMode.SRIOV and
+                not oci_roce_enabled):
+            return None
+        return rdma_mode
 
     @staticmethod
     def _derive_rdma_nic_count(context: str, resource: str,

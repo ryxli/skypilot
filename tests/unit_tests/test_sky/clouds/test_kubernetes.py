@@ -5223,7 +5223,8 @@ class TestKubernetesRdmaMode(unittest.TestCase):
                      node_alloc=None,
                      network_type=None,
                      nodes=None,
-                     accelerators=_UNSET):
+                     accelerators=_UNSET,
+                     network_tier=resources_utils.NetworkTier.BEST):
         if accelerators is _UNSET:
             accelerators = {'GB300': 4}
         gpu_resources = mock.MagicMock()
@@ -5236,7 +5237,7 @@ class TestKubernetesRdmaMode(unittest.TestCase):
         gpu_resources.cluster_config_overrides = {}
         gpu_resources.image_id = None
         setattr(gpu_resources, 'assert_launchable', lambda: gpu_resources)
-        gpu_resources.network_tier = resources_utils.NetworkTier.BEST
+        gpu_resources.network_tier = network_tier
 
         region_config = {
             ('kubernetes', 'remote_identity'): 'SERVICE_ACCOUNT',
@@ -5518,6 +5519,100 @@ class TestKubernetesRdmaMode(unittest.TestCase):
         self.assertIsNone(deploy_vars['k8s_rdma_nic_resource'])
         self.assertIsNone(deploy_vars['k8s_rdma_networks'])
         self.assertFalse(deploy_vars['k8s_rdma_host_device_access'])
+
+    _SHARED_DEVICE = {
+        'mode': 'shared_device',
+        'resource': 'rdma/rdma_shared_device_ib',
+    }
+
+    def test_shared_device_puts_the_pod_on_the_host_network_with_one_device(
+            self):
+        from sky.provision.kubernetes.utils import (
+            KubernetesHighPerformanceNetworkType as N)
+        deploy_vars = self._deploy_vars(rdma=self._SHARED_DEVICE,
+                                        network_type=N.NONE)
+        self.assertTrue(deploy_vars['k8s_host_network'])
+        self.assertEqual(deploy_vars['k8s_env_vars']['SKYPILOT_HOST_NETWORK'],
+                         '1')
+        self.assertEqual(deploy_vars['k8s_rdma_nic_resource'],
+                         'rdma/rdma_shared_device_ib')
+        # One request exposes the whole node's devices: not one per GPU.
+        self.assertEqual(deploy_vars['k8s_rdma_nic_count'], 1)
+        self.assertIsNone(deploy_vars['k8s_rdma_networks'])
+        # The plugin injects the devices, so no privileged hostPath.
+        self.assertFalse(deploy_vars['k8s_rdma_host_device_access'])
+        self.assertTrue(deploy_vars['k8s_ipc_lock_capability'])
+
+    def test_shared_device_is_opt_in_through_network_tier(self):
+        from sky.provision.kubernetes.utils import (
+            KubernetesHighPerformanceNetworkType as N)
+        deploy_vars = self._deploy_vars(rdma=self._SHARED_DEVICE,
+                                        network_type=N.NONE,
+                                        network_tier=None)
+        self.assertFalse(deploy_vars['k8s_host_network'])
+        self.assertIsNone(deploy_vars['k8s_rdma_nic_resource'])
+        self.assertFalse(deploy_vars['k8s_ipc_lock_capability'])
+
+    def test_shared_device_skips_a_cpu_only_task(self):
+        from sky.provision.kubernetes.utils import (
+            KubernetesHighPerformanceNetworkType as N)
+        deploy_vars = self._deploy_vars(rdma=self._SHARED_DEVICE,
+                                        network_type=N.NONE,
+                                        accelerators=None)
+        self.assertFalse(deploy_vars['k8s_host_network'])
+        self.assertIsNone(deploy_vars['k8s_rdma_nic_resource'])
+
+    def test_shared_device_without_a_resource_name_is_rejected(self):
+        from sky.provision.kubernetes.utils import (
+            KubernetesHighPerformanceNetworkType as N)
+        with self.assertRaisesRegex(ValueError, 'rdma.resource is not set'):
+            self._deploy_vars(rdma={'mode': 'shared_device'},
+                              network_type=N.NONE)
+
+    def test_shared_device_yields_to_a_network_type_with_its_own_nics(self):
+        from sky.provision.kubernetes.utils import (
+            KubernetesHighPerformanceNetworkType as N)
+        deploy_vars = self._deploy_vars(rdma=self._SHARED_DEVICE,
+                                        network_type=N.COREWEAVE)
+        self.assertIsNone(deploy_vars['k8s_rdma_nic_resource'])
+
+    def test_declaring_a_shared_device_makes_network_tier_best_valid(self):
+        from sky import clouds
+        from sky.provision.kubernetes.utils import (
+            KubernetesHighPerformanceNetworkType as N)
+        network_tier = clouds.CloudImplementationFeatures.CUSTOM_NETWORK_TIER
+        resources = mock.MagicMock()
+        resources.network_tier = resources_utils.NetworkTier.BEST
+        for rdma, is_unsupported in ((self._SHARED_DEVICE, False), ({}, True)):
+            region_config = {('kubernetes', 'rdma', key): value
+                             for key, value in rdma.items()}
+            with patch('sky.provision.kubernetes.utils.get_spot_label',
+                       return_value=(None, None)), \
+                 patch('sky.clouds.kubernetes.Kubernetes._detect_network_type',
+                       return_value=(N.NONE, None)), \
+                 patch('sky.clouds.kubernetes.Kubernetes.'
+                       'remote_identity_is_none', return_value=False), \
+                 patch('sky.skypilot_config.get_effective_region_config',
+                       side_effect=lambda cloud, keys, region,
+                       default_value=None, override_configs=None, rc=
+                       region_config: rc.get((cloud,) + keys, default_value)):
+                unsupported = (
+                    kubernetes.Kubernetes._unsupported_features_for_resources(
+                        resources, region='shared-device-context'))
+            self.assertEqual(network_tier in unsupported, is_unsupported)
+
+    def test_pod_config_can_keep_a_shared_device_pod_off_the_host_network(self):
+        from sky.provision.kubernetes.utils import (
+            KubernetesHighPerformanceNetworkType as N)
+        deploy_vars = self._deploy_vars(
+            rdma=self._SHARED_DEVICE,
+            network_type=N.NONE,
+            pod_config={'spec': {
+                'hostNetwork': False
+            }})
+        self.assertFalse(deploy_vars['k8s_host_network'])
+        self.assertEqual(deploy_vars['k8s_rdma_nic_resource'],
+                         'rdma/rdma_shared_device_ib')
 
     def test_nic_count_scales_with_partial_gpu_request(self):
         # A dual-port shape: 8 VFs across 8 GPUs, asking for 4 -> 4.
