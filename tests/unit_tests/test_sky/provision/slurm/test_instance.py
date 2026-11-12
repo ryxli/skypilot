@@ -566,6 +566,32 @@ class TestTerminateInstances:
         warning.assert_called_once()
         assert 'cleanup failed' in warning.call_args.args[0]
 
+    def test_exit_code_capture_failure_still_cancels_allocation(
+            self, monkeypatch):
+        # A broken runtime venv makes the capture srun exit 127; the
+        # allocation must still be cancelled instead of leaking.
+        client = mock.MagicMock()
+        client.get_jobs_state_by_name.return_value = ['RUNNING']
+        monkeypatch.setattr(instance, '_wait_for_job_states',
+                            mock.MagicMock(return_value=True))
+        capture = mock.MagicMock(side_effect=exceptions.CommandError(
+            127, 'srun', 'Failed to preserve the Slurm allocation exit code.',
+            None))
+        cleanup = mock.MagicMock()
+
+        instance._cancel_slurm_job(client,
+                                   _CLUSTER,
+                                   inside_slurm_cluster=False,
+                                   pre_batch_cancel=cleanup,
+                                   pre_step_cancel=capture)
+
+        capture.assert_called_once()
+        cleanup.assert_called_once()
+        assert client.cancel_jobs_by_name.call_args_list == [
+            mock.call(_CLUSTER, signal='TERM'),
+            mock.call(_CLUSTER, signal='TERM', full=True),
+        ]
+
     def test_graceful_wait_tolerates_transient_query_failure(self, mock_client):
         # One failed poll inside the wait must not fail the teardown.
         replies = [
