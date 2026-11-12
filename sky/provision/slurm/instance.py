@@ -984,8 +984,9 @@ def _make_slurm_client(provider_config: Dict[str, Any]) -> 'slurm.SlurmClient':
 
 
 def _make_login_node_runner(
-    provider_config: Dict[str,
-                          Any]) -> command_runner.SlurmLoginNodeCommandRunner:
+    provider_config: Dict[str, Any],
+    ssh_control_name: str = command_runner.DEFAULT_SSH_CONTROL_NAME,
+) -> command_runner.SlurmLoginNodeCommandRunner:
     ssh_config = provider_config['ssh']
     identities_only = ssh_config.get('identities_only', False)
     return command_runner.SlurmLoginNodeCommandRunner(
@@ -997,12 +998,14 @@ def _make_login_node_runner(
         enable_interactive_auth=True,
         disable_identities_only=not identities_only,
         slurm_user=provider_config.get('slurm_user'),
+        ssh_control_name=ssh_control_name,
     )
 
 
 def _make_client_and_login_runner(
     provider_config: Dict[str, Any],
     inside_slurm_cluster: bool,
+    ssh_control_name: str = command_runner.DEFAULT_SSH_CONTROL_NAME,
 ) -> Tuple['slurm.SlurmClient', command_runner.CommandRunner]:
     """Build the client and runner used for Slurm control commands.
 
@@ -1016,7 +1019,7 @@ def _make_client_and_login_runner(
         return (slurm.SlurmClient(is_inside_slurm_cluster=True),
                 command_runner.LocalProcessCommandRunner())
     return (_make_slurm_client(provider_config),
-            _make_login_node_runner(provider_config))
+            _make_login_node_runner(provider_config, ssh_control_name))
 
 
 def _resolve_sky_base_dir(client: 'slurm.SlurmClient',
@@ -1281,7 +1284,8 @@ def _create_virtual_instance(
 
     # To bootstrap things, we need to do it with SSHCommandRunner first.
     # SlurmCommandRunner is for after the virtual instances are created.
-    login_node_runner = _make_login_node_runner(provider_config)
+    login_node_runner = _make_login_node_runner(provider_config,
+                                                cluster_name_on_cloud)
     remote_home_dir = login_node_runner.get_remote_home_dir()
 
     sky_base_dir = _resolve_sky_base_dir(client, provider_config)
@@ -1863,7 +1867,8 @@ def query_instances(
         if not snapshot_checked and provider_config.get('container_image'):
             # A snapshot is the stopped steady state. Check it before retrying
             # so stopped clusters do not pay for additional Slurm queries.
-            login_node_runner = _make_login_node_runner(provider_config)
+            login_node_runner = _make_login_node_runner(provider_config,
+                                                        cluster_name_on_cloud)
             sky_base_dir = _resolve_sky_base_dir(client, provider_config)
             snapshot_dir = _snapshot_dir(sky_base_dir, cluster_name_on_cloud,
                                          provider_config.get('snapshot_id'))
@@ -1996,7 +2001,7 @@ def stop_instances(
     # Autostop runs this from the cluster's head node (skylet).
     inside_slurm_cluster = slurm_utils.is_inside_slurm_cluster()
     client, login_node_runner = _make_client_and_login_runner(
-        provider_config, inside_slurm_cluster)
+        provider_config, inside_slurm_cluster, cluster_name_on_cloud)
     sky_base_dir = _resolve_sky_base_dir(client, provider_config)
     snapshot_dir = _snapshot_dir(sky_base_dir, cluster_name_on_cloud,
                                  provider_config.get('snapshot_id'))
@@ -2135,7 +2140,11 @@ fi
             f'Failed to verify the Slurm container on node {node} before '
             'preparing its snapshot.')
 
-    subprocess_utils.run_in_parallel(_check_node_container, nodes)
+    subprocess_utils.run_in_parallel(
+        _check_node_container,
+        nodes,
+        subprocess_utils.get_parallel_threads('slurm'),
+    )
 
     generation = uuid.uuid4().hex
     generation_dir = _snapshot_generation_dir(snapshot_dir, generation)
@@ -2197,7 +2206,11 @@ enroot export -f -o {shlex.quote(staging_snapshot_path)} "$enroot_name"
                 f'Failed to snapshot Slurm container rank {rank} on node '
                 f'{node}.')
 
-        subprocess_utils.run_in_parallel(_export_node, list(enumerate(nodes)))
+        subprocess_utils.run_in_parallel(
+            _export_node,
+            list(enumerate(nodes)),
+            subprocess_utils.get_parallel_threads('slurm'),
+        )
         manifest = {
             'version': SNAPSHOT_MANIFEST_VERSION,
             'generation': generation,
@@ -2616,7 +2629,7 @@ def terminate_instances(
     # TODO(kevin): Validate this assumption.
     inside_slurm_cluster = slurm_utils.is_inside_slurm_cluster()
     client, login_node_runner = _make_client_and_login_runner(
-        provider_config, inside_slurm_cluster)
+        provider_config, inside_slurm_cluster, cluster_name_on_cloud)
     pre_batch_cancel = None
     pre_step_cancel = None
     if not inside_slurm_cluster:
@@ -2726,15 +2739,9 @@ def get_command_runners(
     login_node_ssh_proxy_jump = login_node_ssh_config.get('proxyjump', None)
     login_node_identities_only = login_node_ssh_config.get(
         'identities_only', False)
-    # For Slurm, multiple SkyPilot clusters may share the same underlying
-    # Slurm login node. By using a fixed ssh_control_name ('__default__'),
-    # we ensure that all connections to the same login node reuse the same
-    # SSH ControlMaster process, avoiding repeated SSH handshakes.
-    #
-    # The %C token in ControlPath (see ssh_options_list) ensures that
-    # connections to different login nodes use different sockets, avoiding
-    # collisions between different Slurm clusters.
-    ssh_control_name = command_runner.DEFAULT_SSH_CONTROL_NAME
+    # Keep compute-node SSH multiplexing within one SkyPilot cluster. The
+    # ControlPath %C still isolates login host, port, and user.
+    ssh_control_name = cluster_name_on_cloud
 
     slurm_user = provider_config.get('slurm_user')
     client = slurm.SlurmClient(

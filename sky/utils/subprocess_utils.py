@@ -217,6 +217,10 @@ def get_parallel_threads(cloud_str: Optional[str] = None) -> int:
     Args:
         cloud_str: The cloud
     """
+    # A Slurm launch fans out SSH and srun work per node. Bound each launch,
+    # rather than scaling that fanout with the API server's CPU count.
+    if cloud_str and cloud_str.lower() == 'slurm':
+        return 4
     cpu_count = os.cpu_count()
     if cpu_count is None:
         cpu_count = 1

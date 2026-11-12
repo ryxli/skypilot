@@ -1,10 +1,12 @@
 """Unit tests for subprocess_utils.py."""
+from concurrent import futures
 import contextvars
 import logging
 import multiprocessing
 import signal
 import subprocess
 import sys
+import threading
 import time
 import unittest
 from unittest import mock
@@ -530,3 +532,60 @@ def test_run_in_parallel_runs_in_caller_context():
     finally:
         _CALLER_VAR.reset(token)
     assert values == ['caller'] * 8
+
+
+class _FakeSession:
+    """Tracks concurrent transfers and rejects more than its session limit."""
+
+    def __init__(self, limit, block_until_rejected=False):
+        self.limit = limit
+        self.block_until_rejected = block_until_rejected
+        self.active = 0
+        self.peak = 0
+        self.lock = threading.Lock()
+        self.release = threading.Event()
+
+    def transfer(self, _):
+        with self.lock:
+            self.active += 1
+            self.peak = max(self.peak, self.active)
+            if self.active > self.limit:
+                self.active -= 1
+                self.release.set()
+                raise RuntimeError('session limit exceeded')
+        try:
+            if self.block_until_rejected:
+                self.release.wait(timeout=1)
+            else:
+                time.sleep(.01)
+        finally:
+            with self.lock:
+                self.active -= 1
+
+
+def test_slurm_parallel_dispatch_stays_within_session_limit(monkeypatch):
+    """Slurm's 32-node fanout must not overwhelm a ten-session login node."""
+    monkeypatch.setattr(subprocess_utils.os, 'cpu_count', lambda: 32)
+    nodes = list(range(32))
+
+    baseline = _FakeSession(limit=10, block_until_rejected=True)
+    with pytest.raises(RuntimeError, match='session limit exceeded'):
+        subprocess_utils.run_in_parallel(
+            baseline.transfer,
+            nodes,
+            subprocess_utils.get_parallel_threads(),
+        )
+    assert baseline.peak > baseline.limit
+
+    # Each dispatcher is per launch; this is not a global admission limit.
+    launches = [_FakeSession(limit=10), _FakeSession(limit=10)]
+
+    def launch_sync(launch):
+        return subprocess_utils.run_in_parallel(
+            launch.transfer, nodes,
+            subprocess_utils.get_parallel_threads('slurm'))
+
+    with futures.ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(launch_sync, launches))
+    assert all(len(result) == 32 for result in results)
+    assert all(launch.peak <= 4 for launch in launches)

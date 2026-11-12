@@ -78,7 +78,8 @@ def test_orphaned_snapshot_isolated_from_new_cluster(tmp_path, monkeypatch,
     client.query_jobs.return_value = []
     client.get_jobs_state_by_name.return_value = []
     monkeypatch.setattr(instance, '_make_slurm_client', lambda _: client)
-    monkeypatch.setattr(instance, '_make_login_node_runner', lambda _: runner)
+    monkeypatch.setattr(instance, '_make_login_node_runner',
+                        lambda *_args, **_kwargs: runner)
     monkeypatch.setattr(instance.slurm_utils, 'is_inside_slurm_cluster',
                         lambda: False)
     original_run = runner.run
@@ -872,6 +873,22 @@ class TestStopInstances:
         assert len(exports) == 1
         assert f'{snapshot_dir}/.staging-' in exports[0]
 
+    def test_stop_limits_snapshot_node_fanout(self, monkeypatch):
+        self._setup(monkeypatch, [f'node-{i}' for i in range(32)])
+        worker_limits = []
+
+        def run_in_parallel(func, args, num_threads):
+            worker_limits.append(num_threads)
+            return [func(arg) for arg in args]
+
+        monkeypatch.setattr(instance.subprocess_utils, 'run_in_parallel',
+                            run_in_parallel)
+
+        instance.stop_instances(_CLUSTER,
+                                provider_config=_CONTAINER_PROVIDER_CONFIG)
+
+        assert worker_limits == [4, 4]
+
     def test_drains_steps_before_snapshotting_job_database(self, monkeypatch):
         client, login_runner, head_runner, _, _ = self._setup(
             monkeypatch, ['node-a'])
@@ -1485,21 +1502,27 @@ class TestGetCommandRunners:
     """Container-ness must come from persisted config, not a filesystem probe."""
 
     @staticmethod
-    def _cluster_info(provider_config):
-        instance_info = instance.common.InstanceInfo(
-            instance_id='123,node-a',
-            internal_ip='10.0.0.1',
-            external_ip='login.example.com',
-            ssh_port=22,
-            tags={
-                instance.constants.TAG_SKYPILOT_CLUSTER_NAME: _CLUSTER,
-                'job_id': '123',
-                'node': 'node-a',
-            },
-            node_name='123,node-a')
+    def _cluster_info(provider_config, *, cluster_name=_CLUSTER, num_nodes=1):
+        instances = {}
+        for index in range(num_nodes):
+            node = f'node-{index}'
+            instance_id = f'123,{node}'
+            instances[instance_id] = [
+                instance.common.InstanceInfo(
+                    instance_id=instance_id,
+                    internal_ip=f'10.0.0.{index + 1}',
+                    external_ip='login.example.com',
+                    ssh_port=22,
+                    tags={
+                        instance.constants.TAG_SKYPILOT_CLUSTER_NAME: cluster_name,
+                        'job_id': '123',
+                        'node': node,
+                    },
+                    node_name=instance_id)
+            ]
         return instance.common.ClusterInfo(
-            instances={'123,node-a': [instance_info]},
-            head_instance_id='123,node-a',
+            instances=instances,
+            head_instance_id='123,node-0',
             provider_name='slurm',
             provider_config=provider_config,
         )
@@ -1566,6 +1589,29 @@ class TestGetCommandRunners:
 
         client.check_file_exists.assert_not_called()
         assert runners[0].container_args is not None
+
+    def test_compute_runners_isolate_control_masters_by_cluster(
+            self, monkeypatch, tmp_path):
+        self._resolve_paths(monkeypatch, mock.MagicMock())
+        config = self._provider_config(tmp_path, container=False)
+        first = instance.get_command_runners(
+            self._cluster_info(config, cluster_name='launch-a', num_nodes=32))
+        second = instance.get_command_runners(
+            self._cluster_info(config, cluster_name='launch-b', num_nodes=32))
+
+        first_masters = {runner.ssh_control_name for runner in first}
+        second_masters = {runner.ssh_control_name for runner in second}
+        assert len(first_masters) == len(second_masters) == 1
+        assert first_masters.isdisjoint(second_masters)
+
+    def test_login_runner_uses_cluster_control_name(self, monkeypatch):
+        runner_class = mock.MagicMock()
+        monkeypatch.setattr(instance.command_runner,
+                            'SlurmLoginNodeCommandRunner', runner_class)
+
+        instance._make_login_node_runner(_PROVIDER_CONFIG, 'cluster-a')
+
+        assert runner_class.call_args.kwargs['ssh_control_name'] == 'cluster-a'
 
 
 class TestQueryInstances:
