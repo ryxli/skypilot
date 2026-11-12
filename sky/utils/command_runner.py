@@ -2381,11 +2381,9 @@ class SlurmCommandRunner(SlurmLoginNodeCommandRunner):
         extra_srun_args = (f'{self.container_args} '
                            if in_container and self.container_args else '')
         if in_container:
-            # TODO(kevin): Cache container home dir using kv_cache.py keyed by
-            # container image+version (same image -> same $HOME).
-            remote_home_dir = self.get_remote_home_dir()
+            get_remote_home_dir = self.get_remote_home_dir
         else:
-            remote_home_dir = self.sky_dir
+            get_remote_home_dir = lambda _=None: self.sky_dir
 
         if self.slurm_user is None:
             ssh_command = ' '.join(
@@ -2415,7 +2413,7 @@ exec {ssh_command} srun --unbuffered --quiet --overlap {extra_srun_args}\\
                             log_path=log_path,
                             stream_logs=stream_logs,
                             max_retry=max_retry,
-                            get_remote_home_dir=lambda _=None: remote_home_dir,
+                            get_remote_home_dir=get_remote_home_dir,
                             timeout=timeout)
             finally:
                 try:
@@ -2432,17 +2430,16 @@ exec {ssh_command} srun --unbuffered --quiet --overlap {extra_srun_args}\\
                          f'--nodelist={shlex.quote(self.slurm_node)} '
                          f'--nodes=1 --ntasks=1 rsync')
         remote_rsync_command = self.command_as_user(shlex.split(rsync_command))
-        SSHCommandRunner.rsync(
-            self,
-            source,
-            target,
-            up=up,
-            log_path=log_path,
-            stream_logs=stream_logs,
-            max_retry=max_retry,
-            get_remote_home_dir=lambda _=None: remote_home_dir,
-            timeout=timeout,
-            remote_rsync_command=remote_rsync_command)
+        SSHCommandRunner.rsync(self,
+                               source,
+                               target,
+                               up=up,
+                               log_path=log_path,
+                               stream_logs=stream_logs,
+                               max_retry=max_retry,
+                               get_remote_home_dir=get_remote_home_dir,
+                               timeout=timeout,
+                               remote_rsync_command=remote_rsync_command)
 
     def _inline_command_quote_levels(self) -> int:
         # _run_via_srun adds an `srun ... bash -c` shell.
