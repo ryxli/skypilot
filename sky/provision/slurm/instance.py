@@ -110,6 +110,9 @@ _SBATCH_PROTECTED_OPTIONS = frozenset({
     'cpus-per-task',
     'mem',
     'partition',
+    # The batch script and steps are SkyPilot's: B: hits a script with no
+    # handler, and without B: the keeper steps; either ends the job early.
+    'signal',
 })
 # Merged into the --gres directive SkyPilot writes for the GPUs, so that
 # non-GPU GRES (e.g. local scratch disk) can be requested alongside them.
