@@ -184,6 +184,29 @@ Use high-performance networking
 
         By default SkyPilot uses host networking to reach the RDMA fabric, matching Oracle's bare-metal RDMA setup. If your OKE cluster instead hands out RDMA NICs as SR-IOV virtual functions, set :ref:`kubernetes.rdma.mode: sriov <config-yaml-kubernetes-rdma>` for that context.
 
+    .. tab-item:: Shared RDMA device plugin
+        :sync: rdma-shared-device-tab
+
+        Clusters that expose their RDMA NICs through the `shared RDMA device plugin <https://github.com/Mellanox/k8s-rdma-shared-dev-plugin>`_ need no SkyPilot configuration. SkyPilot recognizes them by the ``rdma/*`` resource the plugin advertises on the GPU nodes.
+
+        Use ``resources.network_tier: best`` to give each GPU pod one unit of that resource, the ``IPC_LOCK`` capability and the host network.
+
+        .. code-block:: yaml
+          :emphasize-lines: 4
+
+          resources:
+            infra: k8s
+            accelerators: B200:8
+            network_tier: best
+
+          num_nodes: 2
+
+        The host network is what RoCE needs: the plugin injects the RDMA devices but not the NIC behind them. On an InfiniBand fabric, set ``hostNetwork: false`` in ``pod_config`` to stay on the pod network.
+
+        SkyPilot sets no NCCL variables here, since the right ones depend on the fabric. Set them in the task's ``envs`` unless the cluster already injects them.
+
+        If the GPU nodes advertise more than one ``rdma/*`` resource, SkyPilot does not pick one; request the intended resource through ``pod_config``.
+
 
 Using Ray with SkyPilot
 ~~~~~~~~~~~~~~~~~~~~~~~

@@ -3890,6 +3890,92 @@ class TestKubernetesDetectNetworkType(unittest.TestCase):
             result,
             (kubernetes_utils.KubernetesHighPerformanceNetworkType.NONE, None))
 
+    def _detect_shared_rdma_device(self, mock_get_nodes, nodes):
+        """Detect on nodes given as (labels, allocatable) pairs."""
+        mock_nodes = []
+        for labels, allocatable in nodes:
+            mock_node = self._create_mock_node(labels)
+            mock_node.status.allocatable = allocatable
+            mock_nodes.append(mock_node)
+        mock_get_nodes.return_value = mock_nodes
+        return kubernetes.Kubernetes._detect_network_type(
+            context='test-context',
+            network_tier=resources_utils.NetworkTier.BEST,
+            k8s_resource_key='nvidia.com/gpu')
+
+    @patch('sky.provision.kubernetes.utils.get_kubernetes_nodes')
+    def test_shared_rdma_device_is_detected_from_the_advertised_resource(
+            self, mock_get_nodes):
+        """No vendor label: the plugin's resource on a GPU node is the signal."""
+        result = self._detect_shared_rdma_device(mock_get_nodes, [({
+            'feature.node.kubernetes.io/rdma.available': 'true'
+        }, {
+            'nvidia.com/gpu': '8',
+            'rdma/rdma_shared_device_ib': '63'
+        })])
+
+        self.assertEqual(result, (
+            kubernetes_utils.KubernetesHighPerformanceNetworkType.
+            RDMA_SHARED_DEVICE,
+            {
+                'rdma_resource': 'rdma/rdma_shared_device_ib'
+            },
+        ))
+
+    @patch('sky.provision.kubernetes.utils.get_kubernetes_nodes')
+    def test_shared_rdma_device_is_read_off_gpu_nodes_only(
+            self, mock_get_nodes):
+        """A storage fabric on CPU nodes is not the training fabric."""
+        result = self._detect_shared_rdma_device(mock_get_nodes, [({}, {
+            'rdma/rdma_shared_device_eth': '63'
+        }), ({}, {
+            'nvidia.com/gpu': '8',
+            'rdma/rdma_shared_device_ib': '63'
+        })])
+
+        self.assertEqual(result[1],
+                         {'rdma_resource': 'rdma/rdma_shared_device_ib'})
+
+    @patch('sky.provision.kubernetes.utils.get_kubernetes_nodes')
+    def test_several_shared_rdma_devices_are_not_guessed(self, mock_get_nodes):
+        result = self._detect_shared_rdma_device(mock_get_nodes, [({}, {
+            'nvidia.com/gpu': '8',
+            'rdma/rdma_shared_device_ib': '63',
+            'rdma/rdma_shared_device_eth': '63'
+        })])
+
+        self.assertEqual(
+            result,
+            (kubernetes_utils.KubernetesHighPerformanceNetworkType.NONE, None))
+
+    @patch('sky.provision.kubernetes.utils.get_kubernetes_nodes')
+    def test_a_shared_rdma_device_with_nothing_to_hand_out_is_not_detected(
+            self, mock_get_nodes):
+        result = self._detect_shared_rdma_device(mock_get_nodes, [({}, {
+            'nvidia.com/gpu': '8',
+            'rdma/rdma_shared_device_ib': '0'
+        })])
+
+        self.assertEqual(
+            result,
+            (kubernetes_utils.KubernetesHighPerformanceNetworkType.NONE, None))
+
+    @patch('sky.provision.kubernetes.utils.get_kubernetes_nodes')
+    def test_a_vendor_fabric_wins_over_a_shared_rdma_device(
+            self, mock_get_nodes):
+        """CoreWeave also advertises an rdma/ resource; its label decides."""
+        result = self._detect_shared_rdma_device(mock_get_nodes, [({
+            'ib.coreweave.cloud/speed': '100G'
+        }, {
+            'nvidia.com/gpu': '8',
+            'rdma/ib': '1'
+        })])
+
+        self.assertEqual(
+            result,
+            (kubernetes_utils.KubernetesHighPerformanceNetworkType.COREWEAVE,
+             None))
+
     @patch('sky.provision.kubernetes.utils.get_kubernetes_nodes')
     def test_gke_a3_highgpu_detection(self, mock_get_nodes):
         """Test detection of GKE A3 highgpu instance type."""
@@ -5222,6 +5308,7 @@ class TestKubernetesRdmaMode(unittest.TestCase):
                      pod_config=None,
                      node_alloc=None,
                      network_type=None,
+                     network_metadata=None,
                      nodes=None,
                      accelerators=_UNSET):
         if accelerators is _UNSET:
@@ -5297,7 +5384,8 @@ class TestKubernetesRdmaMode(unittest.TestCase):
              patch('sky.catalog.get_image_id_from_tag',
                    return_value='img:latest'), \
              patch('sky.clouds.kubernetes.Kubernetes._detect_network_type',
-                   return_value=(network_type or N.OCI_ROCE, None)), \
+                   return_value=(network_type or N.OCI_ROCE,
+                                 network_metadata)), \
              patch('sky.provision.kubernetes.oci_nccl._read_configmap',
                    return_value=None) as self.mock_read_cm:
             mock_ws.return_value.get.return_value = None
@@ -5518,6 +5606,45 @@ class TestKubernetesRdmaMode(unittest.TestCase):
         self.assertIsNone(deploy_vars['k8s_rdma_nic_resource'])
         self.assertIsNone(deploy_vars['k8s_rdma_networks'])
         self.assertFalse(deploy_vars['k8s_rdma_host_device_access'])
+
+    def _shared_rdma_device_vars(self, **kwargs):
+        from sky.provision.kubernetes.utils import (
+            KubernetesHighPerformanceNetworkType as N)
+        return self._deploy_vars(
+            network_type=N.RDMA_SHARED_DEVICE,
+            network_metadata={'rdma_resource': 'rdma/rdma_shared_device_ib'},
+            node_alloc={
+                'nvidia.com/gpu': '4',
+                'rdma/rdma_shared_device_ib': '63',
+            },
+            **kwargs)
+
+    def test_shared_rdma_device_runs_on_the_host_network_with_one_device(self):
+        deploy_vars = self._shared_rdma_device_vars()
+        self.assertTrue(deploy_vars['k8s_host_network'])
+        self.assertEqual(deploy_vars['k8s_rdma_nic_resource'],
+                         'rdma/rdma_shared_device_ib')
+        # One unit exposes every device: not one per GPU.
+        self.assertEqual(deploy_vars['k8s_rdma_nic_count'], 1)
+        self.assertTrue(deploy_vars['k8s_ipc_lock_capability'])
+        # The plugin injects the devices; no privileged hostPath.
+        self.assertFalse(deploy_vars['k8s_rdma_host_device_access'])
+        self.assertIsNone(deploy_vars['k8s_rdma_networks'])
+
+    def test_shared_rdma_device_is_not_requested_for_a_cpu_only_task(self):
+        deploy_vars = self._shared_rdma_device_vars(accelerators=None)
+        self.assertFalse(deploy_vars['k8s_host_network'])
+        self.assertIsNone(deploy_vars['k8s_rdma_nic_resource'])
+
+    def test_shared_rdma_device_pod_config_can_keep_the_pod_network(self):
+        """An InfiniBand cluster needs the device but not the host network."""
+        deploy_vars = self._shared_rdma_device_vars(
+            pod_config={'spec': {
+                'hostNetwork': False
+            }})
+        self.assertFalse(deploy_vars['k8s_host_network'])
+        self.assertEqual(deploy_vars['k8s_rdma_nic_resource'],
+                         'rdma/rdma_shared_device_ib')
 
     def test_nic_count_scales_with_partial_gpu_request(self):
         # A dual-port shape: 8 VFs across 8 GPUs, asking for 4 -> 4.
