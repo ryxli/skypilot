@@ -54,6 +54,9 @@ logger = sky_logging.init_logger(__name__)
 _SKYPILOT_SYSTEM_NAMESPACE = 'skypilot-system'
 
 AWS_EFA_RESOURCE_KEY = 'vpc.amazonaws.com/efa'
+# Default resourcePrefix of k8s-rdma-shared-dev-plugin; the name after it is
+# chosen by whoever configured the plugin.
+SHARED_RDMA_DEVICE_RESOURCE_PREFIX = 'rdma/'
 
 # Cluster-autoscaler caps graceful pod termination at this many
 # seconds by default (--max-graceful-termination-sec=600). Rendering a
@@ -1189,6 +1192,11 @@ class Kubernetes(clouds.Cloud):
         # to change with the delivery model.
         rdma_mode = self._resolve_rdma_mode(context, oci_roce_enabled)
         sriov_mode = (rdma_mode == kubernetes_enums.KubernetesRdmaMode.SRIOV)
+        # A CPU-only task has no use for the fabric, so it stays an ordinary
+        # pod on the pod network.
+        shared_rdma_device = bool(acc_count) and (
+            network_type
+            == KubernetesHighPerformanceNetworkType.RDMA_SHARED_DEVICE)
 
         k8s_efa_count = None
         if network_type == KubernetesHighPerformanceNetworkType.AWS_EFA:
@@ -1414,7 +1422,10 @@ class Kubernetes(clouds.Cloud):
         elif sriov_mode:
             k8s_host_network = False
         else:
-            k8s_host_network = oci_roce_enabled
+            # The shared device plugin injects the devices but no network
+            # interface, and a RoCE queue pair needs the NIC behind its GID in
+            # the pod's network namespace.
+            k8s_host_network = oci_roce_enabled or shared_rdma_device
 
         # Reaching the RDMA devices through a /dev/infiniband hostPath needs a
         # privileged container, and is only how the bare-metal model works. An
@@ -1492,6 +1503,12 @@ class Kubernetes(clouds.Cloud):
             # One attachment per VF, matching the resource count.
             k8s_rdma_networks = ','.join([k8s_rdma_networks] *
                                          k8s_rdma_nic_count)
+        if shared_rdma_device:
+            assert metadata is not None, network_type
+            k8s_rdma_nic_resource = metadata['rdma_resource']
+            # One unit exposes every RDMA device on the node, so it does not
+            # scale with the GPUs requested.
+            k8s_rdma_nic_count = 1
 
         if k8s_host_network:
             # The port values themselves are written into the pod spec per pod
@@ -2409,6 +2426,30 @@ class Kubernetes(clouds.Cloud):
                         return (KubernetesHighPerformanceNetworkType.GCP_TCPX, {
                             'instance_type': instance_type
                         })
+
+            # No vendor fabric matched. The shared RDMA device plugin is
+            # vendor-neutral, so it is recognised by what it advertises on the
+            # nodes this request can use rather than by a label.
+            shared_rdma_resources = sorted({
+                resource_key for node in nodes if not k8s_resource_key or
+                k8s_resource_key in node.status.allocatable
+                for resource_key, amount in node.status.allocatable.items()
+                if resource_key.startswith(
+                    SHARED_RDMA_DEVICE_RESOURCE_PREFIX) and int(amount) > 0
+            })
+            if len(shared_rdma_resources) == 1:
+                return (KubernetesHighPerformanceNetworkType.RDMA_SHARED_DEVICE,
+                        {
+                            'rdma_resource': shared_rdma_resources[0]
+                        })
+            if shared_rdma_resources:
+                # Which one carries the training fabric is not something the
+                # nodes say, and a wrong guess would silently pick a slower one.
+                logger.warning(
+                    f'Context {context!r} advertises several shared RDMA '
+                    f'device resources ({", ".join(shared_rdma_resources)}); '
+                    'not enabling RDMA for network_tier: best. Request the '
+                    'intended one through pod_config.')
 
         except exceptions.KubeAPIUnreachableError:
             # If we can't reach the cluster, assume no high perf networking

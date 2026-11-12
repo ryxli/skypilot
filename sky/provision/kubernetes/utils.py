@@ -98,6 +98,9 @@ class KubernetesHighPerformanceNetworkType(enum.Enum):
     - OCI_ROCE: Oracle OKE clusters on bare-metal GPU shapes
       (BM.GPU.*.8) with RoCEv2 over Mellanox ConnectX, provisioned via
       dedicated RDMA capacity pools
+    - RDMA_SHARED_DEVICE: Any cluster whose GPU nodes run the shared RDMA
+      device plugin (k8s-rdma-shared-dev-plugin), which exposes every RDMA
+      device on a node through one extended resource
     - NONE: Standard clusters without specialized networking optimizations
 
     The network configurations align with corresponding VM-based
@@ -118,6 +121,7 @@ class KubernetesHighPerformanceNetworkType(enum.Enum):
     TOGETHER = 'together'
     AWS_EFA = 'aws_efa'
     OCI_ROCE = 'oci_roce'
+    RDMA_SHARED_DEVICE = 'rdma_shared_device'
     NONE = 'none'
 
     def get_network_env_vars(self) -> Dict[str, str]:
