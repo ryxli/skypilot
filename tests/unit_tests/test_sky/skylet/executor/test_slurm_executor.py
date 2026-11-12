@@ -2,6 +2,9 @@
 # pylint: disable=protected-access
 import errno
 import os
+import shlex
+import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -77,6 +80,48 @@ def test_unset_step_scoped_slurm_env():
         assert result[name] == 'UNSET', f'{name} leaked into user script env'
     for name, value in _JOB_SCOPED_VARS.items():
         assert result[name] == value, f'{name} was wrongly unset'
+
+
+def test_executor_forwards_sigterm_and_returns_script_exit_code(tmp_path):
+    marker = tmp_path / 'terminated'
+    ready = tmp_path / 'ready'
+    script = (
+        f"trap 'sleep 0.2; touch {shlex.quote(str(marker))}; exit 42' TERM\n"
+        f'echo $$ > {shlex.quote(str(ready))}\n'
+        'while true; do sleep 0.1; done\n')
+    env = dict(os.environ,
+               SLURM_PROCID='0',
+               SLURM_NNODES='1',
+               SLURM_JOB_NODELIST=socket.gethostname())
+    command = [
+        sys.executable, '-m', 'sky.skylet.executor.slurm', '--script', script,
+        '--log-dir',
+        str(tmp_path / 'logs'), '--cluster-num-nodes', '1', '--cluster-ips',
+        slurm._get_ip_address()
+    ]
+    with subprocess.Popen(command,
+                          env=env,
+                          stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE,
+                          text=True) as proc:
+        try:
+            deadline = time.monotonic() + 30
+            while not ready.exists() and proc.poll() is None:
+                assert time.monotonic() < deadline, 'script did not start'
+                time.sleep(0.05)
+            assert ready.exists(), proc.communicate(timeout=5)
+            proc.send_signal(signal.SIGTERM)
+            stdout, stderr = proc.communicate(timeout=15)
+            assert marker.exists(), (stdout, stderr)
+            assert proc.returncode == 42, (stdout, stderr)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+            if ready.exists():
+                try:
+                    os.killpg(int(ready.read_text()), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
 
 
 def _fail_reads_under(monkeypatch, run_done_dir, exc_factory, num_failures):
