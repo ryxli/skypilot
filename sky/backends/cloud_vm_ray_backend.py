@@ -4279,12 +4279,7 @@ class CloudVmRayBackend(backends.Backend['CloudVmRayResourceHandle']):
         # even if some of them raise exceptions. We should replace it with
         # multi-process.
         rich_utils.stop_safe_status()
-        if isinstance(handle.launched_resources.cloud, clouds.Slurm):
-            num_threads = subprocess_utils.get_parallel_threads('slurm')
-        else:
-            num_threads = None
-        subprocess_utils.run_in_parallel(_setup_node, list(range(num_nodes)),
-                                         num_threads)
+        subprocess_utils.run_in_parallel(_setup_node, list(range(num_nodes)))
 
         if detach_setup:
             # Only set this when setup needs to be run outside the self._setup()

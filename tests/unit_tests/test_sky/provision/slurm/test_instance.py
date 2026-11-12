@@ -873,22 +873,6 @@ class TestStopInstances:
         assert len(exports) == 1
         assert f'{snapshot_dir}/.staging-' in exports[0]
 
-    def test_stop_limits_snapshot_node_fanout(self, monkeypatch):
-        self._setup(monkeypatch, [f'node-{i}' for i in range(32)])
-        worker_limits = []
-
-        def run_in_parallel(func, args, num_threads):
-            worker_limits.append(num_threads)
-            return [func(arg) for arg in args]
-
-        monkeypatch.setattr(instance.subprocess_utils, 'run_in_parallel',
-                            run_in_parallel)
-
-        instance.stop_instances(_CLUSTER,
-                                provider_config=_CONTAINER_PROVIDER_CONFIG)
-
-        assert worker_limits == [4, 4]
-
     def test_drains_steps_before_snapshotting_job_database(self, monkeypatch):
         client, login_runner, head_runner, _, _ = self._setup(
             monkeypatch, ['node-a'])

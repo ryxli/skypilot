@@ -21,7 +21,6 @@ from sky.provision import common as provision_common
 from sky.skylet import constants as skylet_constants
 from sky.utils import locks
 from sky.utils import status_lib
-from sky.utils import subprocess_utils
 
 
 def test_command_length_local_shell_limit():
@@ -96,37 +95,6 @@ def test_slurm_exec_cpu_demand_uses_cluster_allocation():
         handle, test_task))
 
     assert demands['CPU'] == 8.0
-
-
-@pytest.mark.parametrize(('cloud', 'expected_threads'),
-                         [(clouds.Slurm(), 4), (clouds.Kubernetes(), None),
-                          (clouds.AWS(), None)])
-def test_setup_limits_only_slurm_node_fanout(monkeypatch, cloud,
-                                             expected_threads):
-    backend = object.__new__(cloud_vm_ray_backend.CloudVmRayBackend)
-    backend.run_timestamp = 'test'
-    backend._dump_final_script = False
-    handle = MagicMock()
-    handle.provision_runtime_metadata.setup_done = False
-    handle.internal_ips.return_value = ['10.0.0.1'] * 32
-    handle.get_command_runners.return_value = [MagicMock()] * 32
-    handle.launched_resources = resources.Resources(cloud=cloud)
-    handle.cluster_name = 'test-cluster'
-    test_task = task.Task()
-    test_task.setup = 'true'
-    captured = {}
-
-    def run_in_parallel(_func, args, num_threads):
-        captured['args'] = args
-        captured['num_threads'] = num_threads
-        return []
-
-    monkeypatch.setattr(subprocess_utils, 'run_in_parallel', run_in_parallel)
-
-    backend._setup(handle, test_task, detach_setup=True)
-
-    assert captured['args'] == list(range(32))
-    assert captured['num_threads'] == expected_threads
 
 
 class TestCloudVmRayBackendTaskRedaction:

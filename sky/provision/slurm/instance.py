@@ -2140,11 +2140,7 @@ fi
             f'Failed to verify the Slurm container on node {node} before '
             'preparing its snapshot.')
 
-    subprocess_utils.run_in_parallel(
-        _check_node_container,
-        nodes,
-        subprocess_utils.get_parallel_threads('slurm'),
-    )
+    subprocess_utils.run_in_parallel(_check_node_container, nodes)
 
     generation = uuid.uuid4().hex
     generation_dir = _snapshot_generation_dir(snapshot_dir, generation)
@@ -2206,11 +2202,7 @@ enroot export -f -o {shlex.quote(staging_snapshot_path)} "$enroot_name"
                 f'Failed to snapshot Slurm container rank {rank} on node '
                 f'{node}.')
 
-        subprocess_utils.run_in_parallel(
-            _export_node,
-            list(enumerate(nodes)),
-            subprocess_utils.get_parallel_threads('slurm'),
-        )
+        subprocess_utils.run_in_parallel(_export_node, list(enumerate(nodes)))
         manifest = {
             'version': SNAPSHOT_MANIFEST_VERSION,
             'generation': generation,
