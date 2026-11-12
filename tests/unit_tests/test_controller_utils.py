@@ -739,6 +739,17 @@ def test_controller_config_keeps_an_id_over_a_clashing_name(
         assert skypilot_config.get_active_workspace() == 'team-a'
 
 
+@pytest.mark.parametrize('consolidated', [False, True])
+def test_controller_config_admin_policy(consolidated: bool, monkeypatch):
+    """Only a consolidated controller, which runs in the API server where the
+    policy is installed, keeps the admin policy."""
+    saved_config = _controller_config(consolidated,
+                                      {'admin_policy': 'my_policy.Policy'},
+                                      monkeypatch)
+
+    assert ('admin_policy' in saved_config) == consolidated
+
+
 @pytest.mark.parametrize('controller_type', ['jobs', 'serve'])
 def test_shared_controller_vars_to_fill(controller_type: str, monkeypatch):
     """Test that api_server config is removed from user config sent to controller."""

@@ -701,6 +701,34 @@ def test_sdk_launch_no_resize_skips_version_guard(_stub_launch_preamble,
         sdk.launch(task, cluster_name='my-cluster', resize=False)
 
 
+@pytest.mark.parametrize(('by_jobs_controller', 'by_serve_controller'),
+                         [(False, False), (True, False), (False, True)])
+def test_sdk_launch_client_admin_policy(by_jobs_controller, by_serve_controller,
+                                        _stub_launch_preamble, monkeypatch):
+    """Only a user's launch applies the admin policy on the client; the API
+    server applies it to a controller's launch."""
+    import sky
+    from sky.client import sdk
+
+    monkeypatch.setattr('sky.client.sdk.versions.get_remote_api_version',
+                        lambda: 56)
+    apply = mock.Mock(side_effect=RuntimeError('applied'))
+    monkeypatch.setattr(
+        'sky.client.sdk.admin_policy_utils.'
+        'apply_and_use_config_in_current_request', apply)
+    monkeypatch.setattr('sky.client.sdk._launch',
+                        mock.Mock(side_effect=RuntimeError('launched')))
+    by_controller = by_jobs_controller or by_serve_controller
+
+    with pytest.raises(RuntimeError,
+                       match='launched' if by_controller else 'applied'):
+        sdk.launch(sky.Task(run='echo hi'),
+                   cluster_name='my-cluster',
+                   _is_launched_by_jobs_controller=by_jobs_controller,
+                   _is_launched_by_sky_serve_controller=by_serve_controller)
+    assert apply.called != by_controller
+
+
 @pytest.mark.parametrize('api_version', [None, 24, 56])
 def test_sdk_validate_slurm_host_path_errors_on_old_server(
         api_version, monkeypatch):
