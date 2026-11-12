@@ -1434,6 +1434,62 @@ class TestRemoteHomeDirLookup:
             0]
         mock_sleep.assert_not_called()
 
+    @pytest.mark.parametrize('slurm_user', [None, 'alice'])
+    def test_slurm_container_home_retry_shares_rsync_deadline(
+            self, slurm_user) -> None:
+        """A transient container-home failure must not reset the rsync budget."""
+        runner = command_runner.SlurmCommandRunner(
+            node=('login.example.com', 22),
+            ssh_user='ubuntu',
+            ssh_private_key=None,
+            sky_dir='/home/alice/.sky_clusters/test',
+            skypilot_runtime_dir='/tmp/test',
+            job_id='123',
+            slurm_node='node-1',
+            container_args='--container-name=test:exec',
+            slurm_user=slurm_user)
+        clock = [1000.0]
+        lookup_timeouts = []
+        rsync_timeouts = []
+
+        def get_home(timeout):
+            lookup_timeouts.append(timeout)
+            if len(lookup_timeouts) == 1:
+                clock[0] += 5
+                raise exceptions.CommandError(255, '', 'refused', None)
+            return '/container/home'
+
+        def fake_sleep(seconds):
+            clock[0] += seconds
+
+        def fake_run_with_log(_command, *_args, **kwargs):
+            rsync_timeouts.append(kwargs['timeout'])
+            return 0, '', ''
+
+        with mock.patch.object(runner,
+                               'get_remote_home_dir',
+                               side_effect=get_home), \
+             mock.patch.object(command_runner.common_utils.Backoff,
+                               'current_backoff', return_value=1), \
+             mock.patch.object(command_runner.log_lib,
+                               'run_with_log',
+                               side_effect=fake_run_with_log), \
+             mock.patch.object(command_runner.time,
+                               'sleep',
+                               side_effect=fake_sleep), \
+             mock.patch.object(command_runner.time,
+                               'monotonic',
+                               side_effect=lambda: clock[0]):
+            runner.rsync('/tmp',
+                         '~/sky_workdir',
+                         up=True,
+                         stream_logs=False,
+                         max_retry=1,
+                         timeout=30)
+
+        assert lookup_timeouts == [30, 24]
+        assert rsync_timeouts == [24]
+
     def test_lookup_retries_share_the_rsync_deadline(self) -> None:
         """A wedged lookup cannot overshoot the rsync's total timeout.
 
