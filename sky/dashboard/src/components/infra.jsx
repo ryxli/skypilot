@@ -2799,6 +2799,7 @@ export function GPUs() {
   const [perNodeGPUs, setPerNodeGPUs] = useState([]);
   // Track which contexts have had their GPU/node data loaded (for progressive loading)
   const [loadedContexts, setLoadedContexts] = useState(new Set());
+  const [kubeInventoryError, setKubeInventoryError] = useState(null);
   const [perClusterSlurmGPUs, setPerClusterSlurmGPUs] = useState([]);
   const [perNodeSlurmGPUs, setPerNodeSlurmGPUs] = useState([]);
   // Slurm clusters whose GPU/node queries have settled — the Slurm
@@ -2975,11 +2976,7 @@ export function GPUs() {
     showLoadingIndicators = true
   ) => {
     try {
-      // Phase 1: Get context names quickly (without GPU data)
-      // This allows UI to show contexts immediately while GPU data loads
-      const contextsData = forceRefresh
-        ? await getWorkspaceContexts()
-        : await dashboardCache.get(getWorkspaceContexts);
+      const contextsData = await getWorkspaceContexts();
 
       if (!contextsData) {
         setWorkspaceInfrastructure({});
@@ -3000,6 +2997,7 @@ export function GPUs() {
         allContextNames: fetchedAllKubeContextNames,
         contextWorkspaceMap: fetchedContextWorkspaceMap,
       } = contextsData;
+      setKubeInventoryError(null);
 
       // Update UI immediately with context names (before GPU data loads)
       setWorkspaceInfrastructure(fetchedWorkspaceInfrastructure || {});
@@ -3099,14 +3097,9 @@ export function GPUs() {
       });
     } catch (error) {
       console.error('Error in fetchKubernetesData:', error);
-      setWorkspaceInfrastructure({});
-      setAllKubeContextNames([]);
-      setAllGPUs([]);
-      setPerContextGPUs([]);
-      setPerNodeGPUs([]);
-      setContextWorkspaceMap({});
-      setContextErrors({});
-      setAvailableWorkspaces([]);
+      setKubeInventoryError(
+        error.message || 'Failed to refresh Kubernetes context inventory'
+      );
       setKubeDataLoaded(true);
       setKubeLoading(false);
     }
@@ -4229,6 +4222,14 @@ export function GPUs() {
 
     return (
       <>
+        {kubeInventoryError && (
+          <div
+            role="alert"
+            className="mb-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800"
+          >
+            Failed to refresh Kubernetes context inventory: {kubeInventoryError}
+          </div>
+        )}
         {sortedSections.map((section, index) => (
           <React.Fragment key={index}>{section.render()}</React.Fragment>
         ))}

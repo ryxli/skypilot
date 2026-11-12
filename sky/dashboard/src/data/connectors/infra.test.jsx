@@ -1,8 +1,18 @@
+const mockCacheGet = jest.fn((fn, args = []) => fn(...args));
+const mockGetWorkspaces = jest.fn();
+const mockGetEnabledCloudsBatch = jest.fn();
+
 // The dashboard cache is a pass-through here so the connector's own logic is
-// what's under test, not the caching layer.
+// what's under test.
 jest.mock('@/lib/cache', () => ({
   __esModule: true,
-  default: { get: jest.fn((fn, args = []) => fn(...args)) },
+  default: { get: (...args) => mockCacheGet(...args) },
+}));
+
+jest.mock('@/data/connectors/workspaces', () => ({
+  __esModule: true,
+  getWorkspaces: (...args) => mockGetWorkspaces(...args),
+  getEnabledCloudsBatch: (...args) => mockGetEnabledCloudsBatch(...args),
 }));
 
 jest.mock('@/data/connectors/client', () => ({
@@ -14,8 +24,60 @@ import { apiClient } from '@/data/connectors/client';
 import {
   getSlurmInfrastructure,
   getSlurmClusterInfrastructure,
+  getWorkspaceContexts,
   slurmClusterGPUsFromNodes,
 } from '@/data/connectors/infra';
+
+describe('getWorkspaceContexts', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockCacheGet.mockImplementation((fn, args = []) => fn(...args));
+    mockGetWorkspaces.mockResolvedValue({ default: {} });
+  });
+
+  it('returns the updated context inventory on the first refresh', async () => {
+    const { DashboardCache } = jest.requireActual('@/lib/cache');
+    const cache = new DashboardCache();
+    mockCacheGet.mockImplementation(cache.get.bind(cache));
+    mockGetEnabledCloudsBatch
+      .mockResolvedValueOnce({
+        default: ['kubernetes/context-1', 'kubernetes/context-2'],
+      })
+      .mockResolvedValueOnce({
+        default: [
+          'kubernetes/context-1',
+          'kubernetes/context-2',
+          'kubernetes/context-3',
+          'kubernetes/context-4',
+          'kubernetes/context-5',
+          'kubernetes/context-6',
+        ],
+      });
+
+    const initialContexts = await getWorkspaceContexts();
+    expect(initialContexts.allContextNames).toEqual(['context-1', 'context-2']);
+    const contexts = await getWorkspaceContexts();
+
+    expect(contexts.allContextNames).toEqual([
+      'context-1',
+      'context-2',
+      'context-3',
+      'context-4',
+      'context-5',
+      'context-6',
+    ]);
+  });
+
+  it('rejects when inventory loading fails', async () => {
+    mockGetEnabledCloudsBatch.mockRejectedValue(
+      new Error('enabled clouds unavailable')
+    );
+
+    await expect(getWorkspaceContexts()).rejects.toThrow(
+      'enabled clouds unavailable'
+    );
+  });
+});
 
 // Every Slurm endpoint answers the same way: POST returns a request id in a
 // header, then /api/get returns the result under a JSON-encoded return_value.

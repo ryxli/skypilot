@@ -375,9 +375,8 @@ export async function getWorkspaceInfrastructure() {
 // This allows the UI to show contexts immediately while GPU data loads progressively
 export async function getWorkspaceContexts() {
   try {
-    // Step 1: Get all accessible workspaces for the user (use cache for performance)
     const { getWorkspaces } = await import('@/data/connectors/workspaces');
-    const workspacesData = await dashboardCache.get(getWorkspaces);
+    const workspacesData = await getWorkspaces();
 
     if (!workspacesData || Object.keys(workspacesData).length === 0) {
       return {
@@ -387,14 +386,11 @@ export async function getWorkspaceContexts() {
       };
     }
 
-    // Step 2: Fetch expanded clouds for all workspaces in a single batch call
     const { getEnabledCloudsBatch } = await import(
       '@/data/connectors/workspaces'
     );
     const workspaceNames = Object.keys(workspacesData);
-    const batchResult = await dashboardCache
-      .get(getEnabledCloudsBatch, [workspaceNames, true])
-      .catch(() => ({}));
+    const batchResult = await getEnabledCloudsBatch(workspaceNames, true);
 
     const workspaceInfraData = {};
     const allContextsAcrossWorkspaces = [];
