@@ -110,6 +110,9 @@ _SBATCH_PROTECTED_OPTIONS = frozenset({
     'cpus-per-task',
     'mem',
     'partition',
+    # The batch script and steps are SkyPilot's: B: hits a script with no
+    # handler, and without B: the keeper steps; either ends the job early.
+    'signal',
 })
 # Merged into the --gres directive SkyPilot writes for the GPUs, so that
 # non-GPU GRES (e.g. local scratch disk) can be requested alongside them.
@@ -1087,9 +1090,11 @@ if path.exists():
         ).fetchone()
     if row is not None and row[0] != 'SUCCEEDED':
         codes = [int(value) for value in (row[1] or '').split(',') if value]
-        code = next((value for value in codes if value != 0), 1)
-        if code < 0:
-            code = 128 - code
+        codes = [128 - value if value < 0 else value for value in codes]
+        # A rank that failed on its own names the cause; its peers only
+        # report the signal that then killed them.
+        code = next((value for value in codes if 0 < value < 128),
+                    next((value for value in codes if value != 0), 1))
 print(code)
 SKY_JOB_EXIT_CODE
 fi"""
@@ -2256,7 +2261,7 @@ enroot export -f -o {shlex.quote(staging_snapshot_path)} "$enroot_name"
 
 def _drain_slurm_workload_steps(client: 'slurm.SlurmClient',
                                 job_id: str) -> None:
-    """Stop every non-infrastructure step before snapshotting an allocation."""
+    """Stop every non-infrastructure step while preserving the allocation."""
     deadline = time.monotonic() + _WORKLOAD_STEP_DRAIN_TIMEOUT_SECONDS
     term_sent_at: Dict[str, float] = {}
     kill_sent: Set[str] = set()
@@ -2276,7 +2281,7 @@ def _drain_slurm_workload_steps(client: 'slurm.SlurmClient',
         for step in workload_steps:
             if step.step_id not in term_sent_at:
                 logger.debug(f'Signalling Slurm workload step {step.step_id} '
-                             f'({step.name}) with TERM before snapshotting.')
+                             f'({step.name}) with TERM.')
                 client.signal_job_step(job_id, step.step_id, 'TERM')
                 term_sent_at[step.step_id] = now
             elif (step.step_id not in kill_sent and
@@ -2292,8 +2297,7 @@ def _drain_slurm_workload_steps(client: 'slurm.SlurmClient',
             remaining = ', '.join(
                 f'{step.step_id} ({step.name})' for step in workload_steps)
             raise RuntimeError(
-                'Cannot snapshot the Slurm cluster because workload steps '
-                f'are still running after '
+                'Slurm workload steps are still running after '
                 f'{_WORKLOAD_STEP_DRAIN_TIMEOUT_SECONDS}s: {remaining}')
         time.sleep(
             min(POLL_INTERVAL_SECONDS, max(0, deadline - time.monotonic())))
@@ -2543,8 +2547,28 @@ def _cancel_slurm_job(
         # Both scancel invocations are needed: without --full, scancel signals
         # all job steps but not the batch script; with --full, it signals the
         # batch script and its child processes.
+        # Drain before capturing the result so TERM handlers can finish while
+        # the keepers still preserve the runtime needed to read the exit code.
+        try:
+            for job_id in client.query_jobs(cluster_name_on_cloud,
+                                            ['running', 'suspended']):
+                _drain_slurm_workload_steps(client, job_id)
+        except Exception as e:  # pylint: disable=broad-except
+            logger.warning(
+                'Failed to drain Slurm workload steps; proceeding with '
+                'cancellation. Details: '
+                f'{common_utils.format_exception(e, use_bracket=True)}')
+            logger.debug('Full exception details:', exc_info=True)
         if pre_step_cancel is not None:
-            pre_step_cancel()
+            # Losing the cached exit code is better than leaking the
+            # allocation; this step needs the runtime venv, which may be gone.
+            try:
+                pre_step_cancel()
+            except exceptions.CommandError as e:
+                logger.warning(
+                    'Failed to preserve the Slurm allocation exit code; '
+                    'proceeding with cancellation. Details: '
+                    f'{common_utils.format_exception(e, use_bracket=True)}')
         client.cancel_jobs_by_name(cluster_name_on_cloud, signal='TERM')
         if pre_batch_cancel is not None:
             try:

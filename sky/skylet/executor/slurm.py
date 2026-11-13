@@ -290,7 +290,8 @@ def main():
                                            log_path,
                                            env_vars=env_vars,
                                            stream_logs=True,
-                                           streaming_prefix=prefix)
+                                           streaming_prefix=prefix,
+                                           forward_sigterm=True)
 
     # For successful tasks in multi-node Slurm jobs (one task per node), wait
     # for all tasks to complete before exiting, because Slurm's
