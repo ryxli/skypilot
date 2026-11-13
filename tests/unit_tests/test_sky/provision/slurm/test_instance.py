@@ -2316,6 +2316,8 @@ class TestWaitForJobNodes:
     ([('FAILED', '7')], 7),
     ([('FAILED', '0,7,0')], 7),
     ([('FAILED', '-15')], 143),
+    ([('FAILED', '143,3')], 3),
+    ([('FAILED', '-15,3')], 3),
     ([('FAILED_SETUP', None)], 1),
     ([('CANCELLED', None)], 1),
     ([('RUNNING', None)], 1),

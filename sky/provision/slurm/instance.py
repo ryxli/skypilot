@@ -1090,9 +1090,11 @@ if path.exists():
         ).fetchone()
     if row is not None and row[0] != 'SUCCEEDED':
         codes = [int(value) for value in (row[1] or '').split(',') if value]
-        code = next((value for value in codes if value != 0), 1)
-        if code < 0:
-            code = 128 - code
+        codes = [128 - value if value < 0 else value for value in codes]
+        # A rank that failed on its own names the cause; its peers only
+        # report the signal that then killed them.
+        code = next((value for value in codes if 0 < value < 128),
+                    next((value for value in codes if value != 0), 1))
 print(code)
 SKY_JOB_EXIT_CODE
 fi"""
