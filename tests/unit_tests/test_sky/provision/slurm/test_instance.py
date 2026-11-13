@@ -522,10 +522,16 @@ class TestTerminateInstances:
             mock.call(_CLUSTER, signal='TERM', full=True),
         ]
 
-    def test_pre_batch_cleanup_runs_between_step_and_batch_term(
-            self, monkeypatch):
+    @pytest.mark.parametrize('job_state', ['RUNNING', 'SUSPENDED'])
+    def test_workload_drain_precedes_capture_and_job_signals(
+            self, monkeypatch, job_state):
+        TestDrainSlurmWorkloadSteps._patch_clock(monkeypatch)
         client = mock.MagicMock()
-        client.get_jobs_state_by_name.return_value = ['RUNNING']
+        client.get_jobs_state_by_name.return_value = [job_state]
+        client.query_jobs.return_value = ['123']
+        keeper = instance.slurm.JobStepInfo('123.0', 'sky-container-keeper')
+        workload = instance.slurm.JobStepInfo('123.2', 'sky-1')
+        client.list_job_steps.side_effect = [[keeper, workload], [keeper]]
         monkeypatch.setattr(instance, '_wait_for_job_states',
                             mock.MagicMock(return_value=True))
         events = []
@@ -535,6 +541,8 @@ class TestTerminateInstances:
             events.append((signal, full))
 
         client.cancel_jobs_by_name.side_effect = cancel
+        client.signal_job_step.side_effect = (lambda *args: events.append(
+            ('step', *args)))
 
         instance._cancel_slurm_job(
             client,
@@ -543,7 +551,51 @@ class TestTerminateInstances:
             pre_batch_cancel=lambda: events.append('cleanup'),
             pre_step_cancel=lambda: events.append('capture'))
 
-        assert events == ['capture', ('TERM', False), 'cleanup', ('TERM', True)]
+        assert events == [
+            ('step', '123', '123.2', 'TERM'),
+            'capture',
+            ('TERM', False),
+            'cleanup',
+            ('TERM', True),
+        ]
+        client.query_jobs.assert_called_once_with(_CLUSTER,
+                                                  ['running', 'suspended'])
+        client.signal_job_step.assert_called_once_with('123', '123.2', 'TERM')
+
+    def test_drain_timeout_still_cancels_allocation(self, mock_client,
+                                                    monkeypatch):
+        clock = TestDrainSlurmWorkloadSteps._patch_clock(monkeypatch)
+        mock_client.query_jobs.return_value = ['123']
+        mock_client.get_jobs_state_by_name.side_effect = _state_then_gone(
+            'RUNNING')
+        mock_client.list_job_steps.return_value = [
+            instance.slurm.JobStepInfo('123.0', 'sky-container-keeper'),
+            instance.slurm.JobStepInfo('123.2', 'sky-1'),
+        ]
+        capture = mock.MagicMock()
+        cleanup = mock.MagicMock()
+        warning = mock.MagicMock()
+        monkeypatch.setattr(instance.logger, 'warning', warning)
+
+        instance._cancel_slurm_job(mock_client,
+                                   _CLUSTER,
+                                   inside_slurm_cluster=False,
+                                   pre_batch_cancel=cleanup,
+                                   pre_step_cancel=capture)
+
+        assert clock.monotonic() == 3
+        assert mock_client.signal_job_step.call_args_list == [
+            mock.call('123', '123.2', 'TERM'),
+            mock.call('123', '123.2', 'KILL'),
+        ]
+        capture.assert_called_once()
+        cleanup.assert_called_once()
+        assert mock_client.cancel_jobs_by_name.call_args_list == [
+            mock.call(_CLUSTER, signal='TERM'),
+            mock.call(_CLUSTER, signal='TERM', full=True),
+        ]
+        assert 'proceeding with cancellation' in warning.call_args.args[0]
+        assert '123.2 (sky-1)' in warning.call_args.args[0]
 
     def test_cleanup_failure_still_cancels_allocation(self, mock_client,
                                                       monkeypatch):
@@ -699,7 +751,7 @@ class TestWaitForJobStates:
 
 
 class TestDrainSlurmWorkloadSteps:
-    """Tests the pre-snapshot Slurm step drain."""
+    """Tests the Slurm workload step drain."""
 
     @staticmethod
     def _patch_clock(monkeypatch):
