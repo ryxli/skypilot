@@ -70,6 +70,7 @@ def run_with_log(cmd: Union[List[str], str],
                  streaming_prefix: Optional[str] = ...,
                  log_cmd: bool = ...,
                  timeout: Optional[int] = ...,
+                 forward_sigterm: bool = ...,
                  **kwargs) -> int:
     ...
 
@@ -90,6 +91,7 @@ def run_with_log(cmd: Union[List[str], str],
                  streaming_prefix: Optional[str] = ...,
                  log_cmd: bool = ...,
                  timeout: Optional[int] = ...,
+                 forward_sigterm: bool = ...,
                  **kwargs) -> Tuple[int, str, str]:
     ...
 
@@ -110,6 +112,7 @@ def run_with_log(cmd: Union[List[str], str],
                  streaming_prefix: Optional[str] = ...,
                  log_cmd: bool = ...,
                  timeout: Optional[int] = ...,
+                 forward_sigterm: bool = ...,
                  **kwargs) -> Tuple[int, int]:
     ...
 
@@ -129,7 +132,8 @@ def run_bash_command_with_log(bash_command: str,
                               env_vars: Optional[Dict[str, str]] = ...,
                               stream_logs: bool = ...,
                               with_ray: bool = ...,
-                              streaming_prefix: Optional[str] = ...) -> int:
+                              streaming_prefix: Optional[str] = ...,
+                              forward_sigterm: bool = ...) -> int:
     ...
 
 
