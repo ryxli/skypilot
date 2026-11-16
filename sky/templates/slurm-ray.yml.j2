@@ -162,6 +162,10 @@ setup_commands:
       export DEBIAN_FRONTEND=noninteractive
       # Helper: apt with retries and exponential backoff (adapted from kubernetes-ray.yml.j2)
       # TODO(kevin): Consolidate with the one in kubernetes-ray.yml.j2
+      # Timeout (seconds) for each apt-get invocation, as in kubernetes-ray.yml.j2.
+      # The install includes build-essential, so it gets longer than there.
+      APT_CMD_TIMEOUT=120
+      APT_INSTALL_CMD_TIMEOUT=600
       apt_install_with_retries() {
         local packages="$@"
         [ -z "$packages" ] && return 0
@@ -170,16 +174,17 @@ setup_commands:
         local tries=3
         local delay=5
         for i in $(seq 1 $tries); do
-          apt-get update >> "$log" 2>&1
-          apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" $packages >> "$log" 2>&1 && { set -e; return 0; }
+          timeout $APT_CMD_TIMEOUT apt-get update >> "$log" 2>&1
+          timeout $APT_INSTALL_CMD_TIMEOUT apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" $packages >> "$log" 2>&1 && { set -e; return 0; }
           echo "apt-get install failed (attempt $i/$tries). Retrying in ${delay}s..." >> "$log"
-          apt-get -f install -y >> "$log" 2>&1 || true
+          timeout $APT_INSTALL_CMD_TIMEOUT apt-get -f install -y >> "$log" 2>&1 || true
           apt-get clean >> "$log" 2>&1 || true
           sleep $delay
           delay=$((delay * 2))
         done
-        echo "apt-get install failed after $tries attempts. Log:" >&2
-        cat "$log" >&2
+        # apt can repeat one warning for gigabytes; the caller keeps what is printed here.
+        echo "apt-get install failed after $tries attempts. Last lines of $log:" >&2
+        tail -n 100 "$log" >&2
         set -e
         return 1
       }
