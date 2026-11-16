@@ -3079,3 +3079,37 @@ def test_memory_hint_names_clusters_in_sorted_order():
                return_value=False):
         hint = slurm_cloud.Slurm._get_memory_hint(mock.MagicMock(memory='8'))
     assert "Cluster 'cl-a'" in hint
+
+
+def test_failed_container_apt_install_prints_a_bounded_log(tmp_path):
+    # apt can repeat one warning for gigabytes, and everything this helper
+    # prints is kept by the provisioner that launched the cluster.
+    template = (Path(slurm_cloud.__file__).parents[1] / 'templates' /
+                'slurm-ray.yml.j2').read_text(encoding='utf-8')
+    start = template.index('      APT_CMD_TIMEOUT=')
+    end = template.index('      if ! /usr/local/bin/dropbear -V', start)
+    helper = template[start:end].replace('/tmp/apt-install.log',
+                                         str(tmp_path / 'apt-install.log'))
+    stubs = tmp_path / 'bin'
+    stubs.mkdir()
+    for name, body in (
+        ('apt-get', 'for i in $(seq 1 5000); do echo "W: line $i"; done\n'
+         'exit 100\n'),
+        ('sleep', 'exit 0\n'),
+        ('timeout', 'shift\nexec "$@"\n'),
+    ):
+        stub = stubs / name
+        stub.write_text('#!/bin/bash\n' + body, encoding='utf-8')
+        stub.chmod(0o755)
+
+    result = subprocess.run(
+        ['bash', '-c', helper + '\napt_install_with_retries socat'],
+        env={'PATH': f'{stubs}:{os.environ["PATH"]}'},
+        capture_output=True,
+        text=True,
+        check=False)
+
+    assert result.returncode == 1
+    printed = result.stderr.splitlines()
+    assert len(printed) <= 101
+    assert printed[-1] == 'W: line 5000'
