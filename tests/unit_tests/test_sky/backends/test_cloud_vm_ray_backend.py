@@ -1144,3 +1144,39 @@ class TestProvisionExistingClusterError:
                     to_provision=launched)
         blocked = optimize.call_args.kwargs['blocked_resources']
         assert any(requested.should_be_blocked_by(b) for b in blocked)
+
+
+class TestLegacyCancelJobs:
+    """Legacy cancellation keeps both output streams in failure diagnostics."""
+
+    @pytest.mark.parametrize('stdout', ['', 'partial cancellation output\n'])
+    def test_failure_includes_stderr(self, stdout):
+        backend = cloud_vm_ray_backend.CloudVmRayBackend()
+        handle = MagicMock(cluster_name='test-cluster',
+                           is_grpc_enabled_with_flag=False)
+        stderr = 'worker connection failed'
+        with patch.object(backend, 'run_on_head',
+                          return_value=(1, stdout, stderr)) as run, \
+             patch.object(cloud_vm_ray_backend.message_utils,
+                          'decode_payload') as decode:
+            with pytest.raises(exceptions.CommandError) as exc_info:
+                backend.cancel_jobs(handle, [1])
+
+        assert exc_info.value.detailed_reason == stdout + stderr
+        run.assert_called_once()
+        decode.assert_not_called()
+
+    def test_success_decodes_stdout_only(self):
+        backend = cloud_vm_ray_backend.CloudVmRayBackend()
+        handle = MagicMock(cluster_name='test-cluster',
+                           is_grpc_enabled_with_flag=False)
+        stdout = cloud_vm_ray_backend.message_utils.encode_payload([1])
+        with patch.object(backend, 'run_on_head',
+                          return_value=(0, stdout, 'unrelated warning')) as run, \
+             patch.object(cloud_vm_ray_backend.message_utils, 'decode_payload',
+                          wraps=cloud_vm_ray_backend.message_utils.decode_payload
+                         ) as decode:
+            backend.cancel_jobs(handle, [1])
+
+        run.assert_called_once()
+        decode.assert_called_once_with(stdout)
