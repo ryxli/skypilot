@@ -50,6 +50,18 @@ class TestClusterHandleNotRequired:
 
 class TestUpdateFields:
 
+    @pytest.mark.parametrize('fields', [
+        ['workspace_name'],
+        ['workspace_name', 'workspace'],
+    ])
+    def test_workspace_name_selects_workspace(self, fields):
+        original_fields = fields.copy()
+        updated_fields, handle_required = jobs_utils._update_fields(fields)
+        assert 'workspace_name' not in updated_fields
+        assert updated_fields.count('workspace') == 1
+        assert not handle_required
+        assert fields == original_fields
+
     def test_always_includes_status_and_job_id(self):
         """Test that status and job_id are always added if not present."""
         fields = ['task_name']
