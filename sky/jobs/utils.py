@@ -198,6 +198,7 @@ _CLUSTER_HANDLE_FIELDS = [
 _NON_DB_FIELDS = _CLUSTER_HANDLE_FIELDS + [
     'user_yaml',
     'user_name',
+    'workspace_name',
     'details',
     # is_job_group is derived from execution column (execution == 'parallel')
     'is_job_group',
@@ -3604,6 +3605,9 @@ def _update_fields(fields: List[str],) -> Tuple[List[str], bool]:
     # user_hash is required if user_name is present
     if 'user_name' in new_fields and 'user_hash' not in new_fields:
         new_fields.append('user_hash')
+    # workspace_name is resolved by the server from the stored workspace ID.
+    if 'workspace_name' in new_fields and 'workspace' not in new_fields:
+        new_fields.append('workspace')
     if 'job_duration' in new_fields:
         if 'last_recovered_at' not in new_fields:
             new_fields.append('last_recovered_at')
