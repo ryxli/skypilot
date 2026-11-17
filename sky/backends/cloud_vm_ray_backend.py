@@ -5059,14 +5059,14 @@ class CloudVmRayBackend(backends.Backend['CloudVmRayResourceHandle']):
         if use_legacy:
             code = job_lib.JobLibCodeGen.cancel_jobs(jobs, cancel_all,
                                                      user_hash)
-            returncode, stdout, _ = self.run_on_head(handle,
-                                                     code,
-                                                     stream_logs=False,
-                                                     require_outputs=True)
+            returncode, stdout, stderr = self.run_on_head(handle,
+                                                          code,
+                                                          stream_logs=False,
+                                                          require_outputs=True)
             subprocess_utils.handle_returncode(
                 returncode, code,
                 f'Failed to cancel jobs on cluster {handle.cluster_name}.',
-                stdout)
+                stdout + stderr)
             cancelled_ids = message_utils.decode_payload(stdout)
         if cancelled_ids:
             logger.info(
