@@ -1706,6 +1706,11 @@ def queue_v2_api(
         sort_order=sort_order,
         submitted_after=submitted_after,
         submitted_before=submitted_before)
+    workspaces = skypilot_config.get_nested(('workspaces',), {})
+    for job in jobs:
+        if job.get('workspace') is not None:
+            job['workspace_name'] = skypilot_config.get_workspace_name(
+                job['workspace'], workspaces)
     if fields:
         # The queue records carry every known column (None for the ones the
         # query didn't select). Callers that pass ``fields`` have declared
@@ -1717,12 +1722,10 @@ def queue_v2_api(
         # always kept: the server force-selects them (see _update_fields)
         # and clients key records on them.
         keep = set(fields) | {'job_id', 'task_id', 'status'}
+        # Keep the display name enrichment for explicit workspace requests.
+        if 'workspace' in keep:
+            keep.add('workspace_name')
         jobs = [{k: v for k, v in job.items() if k in keep} for job in jobs]
-    workspaces = skypilot_config.get_nested(('workspaces',), {})
-    for job in jobs:
-        if job.get('workspace') is not None:
-            job['workspace_name'] = skypilot_config.get_workspace_name(
-                job['workspace'], workspaces)
     return ([responses.ManagedJobRecord(**job) for job in jobs], total,
             status_counts, total_no_filter, infra_options)
 

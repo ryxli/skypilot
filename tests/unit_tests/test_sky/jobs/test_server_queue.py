@@ -38,6 +38,28 @@ def test_v1_queue_handler_defaults_to_lightweight_fields():
         managed_job_constants.DEFAULT_MANAGED_JOB_FIELDS)
 
 
+@pytest.mark.parametrize('fields', [
+    ['workspace_name'],
+    ['workspace_name', 'workspace'],
+    ['workspace'],
+])
+def test_queue_v2_api_enriches_requested_workspace_name(fields):
+    jobs = [{'job_id': 1, 'workspace': 'ws-id'}]
+    with mock.patch.object(jobs_core, 'queue_v2',
+                           return_value=(jobs, 1, {}, 1, [])), \
+         mock.patch.object(jobs_core.skypilot_config, 'get_nested',
+                           return_value={}), \
+         mock.patch.object(jobs_core.skypilot_config, 'get_workspace_name',
+                           return_value='team') as get_name:
+        records, *_ = _unwrap(jobs_core.queue_v2_api)(refresh=False,
+                                                      fields=fields)
+    get_name.assert_called_once_with('ws-id', {})
+    assert records[0].workspace_name == 'team'
+    assert records[0].workspace == ('ws-id' if 'workspace' in fields else None)
+    assert ('workspace' in records[0].model_fields_set) == ('workspace'
+                                                            in fields)
+
+
 def _make_job(job_id: int,
               user_name: Optional[str] = 'alice',
               workspace: Optional[str] = 'ws',
