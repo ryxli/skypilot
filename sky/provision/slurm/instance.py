@@ -147,6 +147,10 @@ def _build_custom_sbatch_directives(sbatch_options: Dict[str, Any]) -> str:
 
     # Normalize: replace underscores with hyphens (sbatch uses hyphens).
     normalized = {k.replace('_', '-'): v for k, v in sbatch_options.items()}
+    # Long and short time options must not produce two effective directives.
+    if normalized.get('time') is not None and normalized.get(
+            'time') is not False:
+        normalized.pop('t', None)
 
     # Warn and skip protected options.
     conflicting = set(normalized.keys()) & _SBATCH_PROTECTED_OPTIONS
@@ -281,7 +285,8 @@ def _compute_time_directive(sbatch_options: Dict[str, Any],
     # `time: false` would suppress both the user's directive AND the auto
     # fallback, silently bypassing the safety net.
     user_supplied_time = any(
-        sbatch_options.get(k) not in (None, False) for k in ('time', 't'))
+        sbatch_options.get(k) is not None and sbatch_options.get(k) is not False
+        for k in ('time', 't'))
     if user_supplied_time:
         return ''
     # MaxTime first: preserve pre-existing behavior for partitions where
@@ -317,6 +322,60 @@ def _build_sbatch_directives(sbatch_options: Dict[str, Any],
         return user_block
     # user_block is either '' or '\n#SBATCH ...' (leading \n, no trailing).
     return '\n' + auto_time + user_block
+
+
+def get_submission_partition_info(
+        cluster: str, selection: str,
+        sbatch_options: Dict[str, Any]) -> 'slurm.SlurmPartition':
+    """Validate that a joint submission has one effective wall time."""
+    partitions = selection.split(',')
+    if (any(not name or name != name.strip() for name in partitions) or
+            len(set(partitions)) != len(partitions)):
+        raise ValueError(f'Invalid Slurm partition selection {selection!r}: '
+                         'expected distinct, non-empty partition names')
+    if len(partitions) == 1:
+        info = slurm_utils.get_partition_info(cluster, selection)
+        if info is None:
+            raise ValueError(f'Partition info for {selection} not found '
+                             f'for SLURM cluster {cluster}')
+        return info
+    inventory = slurm_utils.get_partition_infos(cluster)
+    missing = set(partitions) - inventory.keys()
+    if missing:
+        raise ValueError(f'Partitions missing on {cluster}: {sorted(missing)}')
+    if not any(
+            sbatch_options.get(k) is not None and
+            sbatch_options.get(k) is not False for k in ('time', 't')):
+        # Empty auto directives can still mean different DefaultTime values.
+        times = {(_compute_time_directive(sbatch_options, inventory[name],
+                                          name), inventory[name].default_time
+                  if inventory[name].maxtime is None else None)
+                 for name in partitions}
+        if len(times) != 1:
+            raise ValueError(
+                f'Partitions {selection} have incompatible time defaults; '
+                'set sbatch_options.time explicitly or select one partition')
+    return inventory[partitions[0]]
+
+
+def _allocated_partition(client: 'slurm.SlurmClient', job_id: str,
+                         selection: str) -> str:
+    """Return the assigned partition, not the submitted partition set."""
+    if ',' not in selection:
+        return selection
+    command = shlex.join(['squeue', '-h', '--jobs', job_id, '-o', '%T|%P'])
+    returncode, stdout, stderr = client.run_command(command)
+    if returncode != 0:
+        raise RuntimeError(f'Cannot read partition for Slurm job {job_id}: '
+                           f'{stderr}')
+    state, _, partitions = stdout.strip().partition('|')
+    # Slurm puts the allocated partition first in a multi-partition record.
+    partition = partitions.split(',')[0]
+    if state != 'RUNNING' or partition not in selection.split(','):
+        raise RuntimeError(
+            f'Slurm job {job_id} reported {state!r} on {partition!r}, '
+            f'expected RUNNING on one of {selection}')
+    return partition
 
 
 def _wait_for_job_nodes(
@@ -1220,10 +1279,9 @@ def prepare_provision_script_inputs(
     cluster = slurm_utils.get_slurm_cluster_from_config(provider)
     partition = slurm_utils.get_partition_from_config(provider)
     if partition_info is None:
-        partition_info = slurm_utils.get_partition_info(cluster, partition)
-    if partition_info is None:
-        raise ValueError(f'Partition info for {partition} not found '
-                         f'for SLURM cluster {cluster}')
+        partition_info = get_submission_partition_info(
+            cluster, partition,
+            config.node_config.get('sbatch_options', {}) or {})
     if client is None:
         client = _make_slurm_client(provider)
     home = client.get_remote_home_dir()
@@ -1774,7 +1832,7 @@ def create_virtual_instance(
         return common.ProvisionRecord(
             provider_name='slurm',
             region=region,
-            zone=partition,
+            zone=_allocated_partition(client, job_id, partition),
             cluster_name=cluster_name_on_cloud,
             head_instance_id=slurm_utils.instance_id(job_id, nodes[0]),
             resumed_instance_ids=[],
@@ -1891,7 +1949,7 @@ def create_virtual_instance(
     return common.ProvisionRecord(
         provider_name='slurm',
         region=region,
-        zone=partition,
+        zone=_allocated_partition(client, job_id, partition),
         cluster_name=cluster_name_on_cloud,
         head_instance_id=created_instance_ids[0],
         resumed_instance_ids=[],
