@@ -1327,6 +1327,73 @@ class TestKubernetesMakeDeployResourcesVariables(unittest.TestCase):
     @patch('sky.provision.kubernetes.network_utils.get_port_mode')
     @patch('sky.catalog.get_image_id_from_tag')
     @patch('sky.clouds.kubernetes.Kubernetes._detect_network_type')
+    def test_nvidia_visible_devices_void_for_cpu_only(
+            self, mock_detect_network_type, mock_get_image, mock_get_port_mode,
+            mock_get_workspace_cloud, mock_get_cloud_config_value,
+            mock_is_exec_auth, mock_get_accelerator_label_keys,
+            mock_get_namespace, mock_get_current_context, mock_get_k8s_nodes,
+            mock_get_label_key_values):
+        """CPU-only pods get NVIDIA_VISIBLE_DEVICES=void so a CDI default
+        runtime cannot inject GPU devices or driver capabilities. GPU pods
+        must not get the variable."""
+        mock_detect_network_type.return_value = (
+            kubernetes_utils.KubernetesHighPerformanceNetworkType.NONE, None)
+        mock_get_current_context.return_value = 'my-k8s-cluster'
+        mock_get_namespace.return_value = 'default'
+        mock_get_accelerator_label_keys.return_value = []
+        mock_get_workspace_cloud.return_value.get.return_value = None
+        mock_is_exec_auth.return_value = (False, None)
+        mock_get_cloud_config_value.side_effect = (
+            lambda cloud, keys, region, default_value=None, override_configs=
+            None: {
+                ('kubernetes', 'remote_identity'): 'SERVICE_ACCOUNT',
+                ('kubernetes', 'provision_timeout'): 10,
+            }.get((cloud,) + keys, default_value))
+        mock_port_mode = mock.MagicMock()
+        mock_port_mode.value = 'portforward'
+        mock_get_port_mode.return_value = mock_port_mode
+        mock_get_image.return_value = 'test-image:latest'
+        mock_get_label_key_values.return_value = ('skypilot.co/accelerator',
+                                                  ['a100'], None, None)
+
+        k8s_cloud = kubernetes.Kubernetes()
+
+        def make_deploy_vars():
+            return k8s_cloud.make_deploy_resources_variables(
+                resources=self.resources,
+                cluster_name=resources_utils.ClusterName(
+                    display_name=self.cluster_name,
+                    name_on_cloud=self.cluster_name),
+                region=self.region,
+                zones=None,
+                num_nodes=1,
+                dryrun=False)
+
+        self.resources.instance_type = '2CPU--4GB'
+        self.resources.accelerators = None
+        cpu_vars = make_deploy_vars()
+        self.assertEqual(cpu_vars['k8s_env_vars']['NVIDIA_VISIBLE_DEVICES'],
+                         'void')
+
+        self.resources.instance_type = '8CPU--32GB--A100:1'
+        self.resources.accelerators = {'A100': 1}
+        with patch('sky.provision.kubernetes.utils.get_gpu_resource_key',
+                   return_value='nvidia.com/gpu'):
+            gpu_vars = make_deploy_vars()
+        self.assertNotIn('NVIDIA_VISIBLE_DEVICES', gpu_vars['k8s_env_vars'])
+
+    @patch('sky.provision.kubernetes.utils.get_accelerator_label_key_values')
+    @patch('sky.provision.kubernetes.utils.get_kubernetes_nodes')
+    @patch('sky.provision.kubernetes.utils.get_current_kube_config_context_name'
+          )
+    @patch('sky.provision.kubernetes.utils.get_kube_config_context_namespace')
+    @patch('sky.provision.kubernetes.utils.get_accelerator_label_keys')
+    @patch('sky.provision.kubernetes.utils.is_kubeconfig_exec_auth')
+    @patch('sky.skypilot_config.get_effective_region_config')
+    @patch('sky.skypilot_config.get_workspace_cloud')
+    @patch('sky.provision.kubernetes.network_utils.get_port_mode')
+    @patch('sky.catalog.get_image_id_from_tag')
+    @patch('sky.clouds.kubernetes.Kubernetes._detect_network_type')
     def test_gke_tpu_multi_host_slice_pods(
             self, mock_detect_network_type, mock_get_image, mock_get_port_mode,
             mock_get_workspace_cloud, mock_get_cloud_config_value,

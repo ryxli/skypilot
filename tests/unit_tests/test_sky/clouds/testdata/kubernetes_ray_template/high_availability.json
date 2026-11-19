@@ -127,7 +127,7 @@
                 },
                 {
                   "name": "NVIDIA_VISIBLE_DEVICES",
-                  "value": "none"
+                  "value": "void"
                 }
               ],
               "image": "us-docker.pkg.dev/skypilot-oss/skypilot/skypilot:latest",
