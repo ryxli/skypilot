@@ -1667,6 +1667,14 @@ available_node_types:
                 # and continue rather than abort the launch -- the cluster comes
                 # up and runs without these patches.
                 {{ ray_patches_cmd }} || echo "WARNING: could not apply Ray patches; continuing without them.";
+{% if k8s_host_network %}
+                # Rebinding sshd below requires the package, host keys, and
+                # config from apt-ssh-setup. Do not race its first restart.
+                until [ -f /tmp/apt_ssh_setup_complete ]; do
+                  [ ! -f "/tmp/${STEPS[0]}.failed" ] || exit 1
+                  sleep 0.1
+                done
+{% endif %}
                 touch /tmp/ray_skypilot_installation_complete
                 echo "=== Ray and skypilot installation completed ==="
 

@@ -12,8 +12,10 @@ and are exercised by smoke tests instead.
 """
 import base64
 import gzip
+import os
 import re
 import socket
+import subprocess
 
 import pytest
 
@@ -174,20 +176,51 @@ class TestSshdPortPropagation:
         assert 'sshd' in host_network_probe.HEAD_PORT_NAMES
         assert 'sshd' in host_network_probe.WORKER_PORT_NAMES
 
-    def test_probe_cmd_rebinds_sshd_after_sourcing_env(self):
-        cmd = instance_setup.ray_head_start_command(custom_resource=None,
-                                                    custom_ray_options=None)
-        # The Port-directive rewrite is gated on SKYPILOT_SSHD_PORT being
-        # set, which the server writes into the pod env. Non-hostNetwork
-        # bootstraps leave it unset and skip the rewrite.
-        assert 'if [ -n "${SKYPILOT_SSHD_PORT:-}" ]' in cmd
-        # Delete-then-append, all under one sudo, so the redirect
-        # happens as root and we don't pay three sudo costs in a row.
-        assert 'sudo sh -c "' in cmd
-        assert ("sed -i -E '/^[[:space:]]*#?[[:space:]]*Port"
-                "[[:space:]]+/d'") in cmd
-        assert 'echo Port ${SKYPILOT_SSHD_PORT} >> /etc/ssh/sshd_config' in cmd
-        assert 'service ssh restart' in cmd
+    @pytest.mark.parametrize(('uid', 'restart_status', 'is_listening', 'error'),
+                             [(0, 0, True, None), (1000, 0, True, None),
+                              (0, 1, False, 'failed to restart sshd'),
+                              (0, 0, False, 'sshd is not listening')])
+    def test_rebind_requires_the_assigned_port_to_listen(
+            self, tmp_path, monkeypatch, uid, restart_status, is_listening,
+            error):
+        config = tmp_path / 'sshd_config'
+        config.write_text('# No Port directive\n')
+        service = tmp_path / 'service'
+        service.write_text('#!/bin/sh\n'
+                           'test "$*" = "ssh restart" || exit 2\n'
+                           f'exit {restart_status}\n')
+        service.chmod(0o755)
+        monkeypatch.setenv('PATH', str(tmp_path), prepend=os.pathsep)
+        monkeypatch.setenv('SSHD_CONFIG', str(config))
+        monkeypatch.setenv('SKYPILOT_HOST_NETWORK', '1')
+        monkeypatch.setattr(instance_setup, '_HOST_NETWORK_PROBE_TARGET',
+                            '"$SSHD_CONFIG.probe"')
+        monkeypatch.setattr(constants, 'SKY_PYTHON_CMD', 'true')
+        cmd = instance_setup._host_network_probe_cmd('head').replace(
+            '/etc/ssh/sshd_config', '"$SSHD_CONFIG"')
+        with socket.socket() as endpoint:
+            endpoint.bind(('127.0.0.1', 0))
+            port = endpoint.getsockname()[1]
+            if is_listening:
+                endpoint.listen()
+            monkeypatch.setenv('SKYPILOT_SSHD_PORT', str(port))
+            script = (f'id() {{ echo {uid}; }}; '
+                      'sudo() { echo used-sudo; "$@"; }; '
+                      f'{cmd}echo start-ray')
+            completed = subprocess.run(['bash', '-c', script],
+                                       check=False,
+                                       capture_output=True,
+                                       text=True,
+                                       timeout=10)
+        assert ('used-sudo' in completed.stdout) == (uid != 0)
+        assert config.read_text() == f'# No Port directive\nPort {port}\n'
+        if error is None:
+            assert completed.returncode == 0, completed.stderr
+            assert 'start-ray' in completed.stdout
+        else:
+            assert completed.returncode != 0
+            assert 'start-ray' not in completed.stdout
+            assert f'{error} on port {port}' in completed.stderr
 
 
 class TestWaitHeadGcsTcp:

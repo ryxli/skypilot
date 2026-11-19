@@ -311,11 +311,17 @@ def _host_network_probe_cmd(mode: str) -> str:
         # without an existing Port directive would otherwise keep the
         # default 22 (where the K8s node's own sshd already listens).
         'if [ -n "${SKYPILOT_SSHD_PORT:-}" ]; then '
-        'sudo sh -c "'
-        'sed -i -E \'/^[[:space:]]*#?[[:space:]]*Port[[:space:]]+/d\' '
+        'if ! $(if [ "$(id -u)" -ne 0 ]; then echo sudo; fi) sh -c \''
+        'sed -i -E "/^[[:space:]]*#?[[:space:]]*Port[[:space:]]+/d" '
         '/etc/ssh/sshd_config && '
-        'echo Port ${SKYPILOT_SSHD_PORT} >> /etc/ssh/sshd_config && '
-        'service ssh restart"; '
+        'echo "Port $1" >> /etc/ssh/sshd_config && '
+        'service ssh restart\' _ "$SKYPILOT_SSHD_PORT"; then '
+        'echo "Error: failed to restart sshd on port $SKYPILOT_SSHD_PORT" >&2; '
+        'exit 1; fi; '
+        'if ! timeout 5 bash -c \'until : <"/dev/tcp/localhost/$1"; do '
+        'sleep 0.1; done\' _ "$SKYPILOT_SSHD_PORT" 2>/dev/null; then '
+        'echo "Error: sshd is not listening on port $SKYPILOT_SSHD_PORT" >&2; '
+        'exit 1; fi; '
         'fi; '
         'fi; ')
 
