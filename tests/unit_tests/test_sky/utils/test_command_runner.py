@@ -415,6 +415,32 @@ class TestSlurmCommandRunnerUserImpersonation:
         with pytest.raises(ValueError):
             command_runner.wrap_command_as_user(argv, 'alice')
 
+    def test_wrap_same_user_quotes_without_wrapper(self):
+        args = ['/usr/bin/printf', '%s', 'a b; $(id)', '$HOME', 'a\nb']
+        wrapped = command_runner.wrap_command_as_user(args,
+                                                      'alice',
+                                                      use_sudo=True,
+                                                      current_user='alice')
+        assert wrapped == shlex.join(args)
+
+    @pytest.mark.parametrize('use_sudo', [False, True])
+    def test_wrap_different_user_keeps_wrapper(self, use_sudo):
+        args = ['squeue', '--me']
+        wrapped = command_runner.wrap_command_as_user(args,
+                                                      'alice',
+                                                      use_sudo=use_sudo,
+                                                      current_user='bob')
+        prefix = (['sudo', '--non-interactive', '-H', '-u', 'alice', '--']
+                  if use_sudo else ['runuser', '-u', 'alice', '--'])
+        assert shlex.split(wrapped) == prefix + args
+
+    @pytest.mark.parametrize('argv', ['', [], 'squeue --me'])
+    def test_wrap_same_user_rejects_invalid_argv(self, argv):
+        with pytest.raises(ValueError):
+            command_runner.wrap_command_as_user(argv,
+                                                'alice',
+                                                current_user='alice')
+
     @pytest.mark.parametrize('ssh_user', ['root', 'ubuntu'])
     def test_login_node_direct_command(self, ssh_user):
         runner = self._login_runner('alice', ssh_user=ssh_user)
@@ -427,6 +453,18 @@ class TestSlurmCommandRunnerUserImpersonation:
         assert argv[-2:] == ['squeue', '--me']
         assert argv[argv.index('-u') + 1] == 'alice'
         assert '/bin/bash' not in argv
+
+    def test_login_node_same_user_direct_command(self):
+        runner = self._login_runner('ubuntu', ssh_user='ubuntu')
+        with mock.patch.object(command_runner.SSHCommandRunner,
+                               'run',
+                               autospec=True,
+                               return_value=(0, '', '')) as run:
+            runner.run(['squeue', '--me'], require_outputs=True)
+        cmd = run.call_args.args[1]
+        assert shlex.join(['squeue', '--me']) in cmd
+        assert 'runuser' not in cmd
+        assert 'sudo' not in cmd
 
     def test_shell_orchestration_runs_as_login_user(self):
         runner = self._login_runner('alice', ssh_user='ubuntu')

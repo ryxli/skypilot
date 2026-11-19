@@ -26,7 +26,8 @@ DEFAULT_SSH_CONTROL_NAME: str
 
 def wrap_command_as_user(argv: List[str],
                          user: str,
-                         use_sudo: bool = ...) -> str:
+                         use_sudo: bool = ...,
+                         current_user: Optional[str] = ...) -> str:
     ...
 
 
