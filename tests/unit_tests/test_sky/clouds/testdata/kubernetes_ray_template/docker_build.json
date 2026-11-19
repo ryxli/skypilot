@@ -69,7 +69,7 @@
                 },
                 {
                   "name": "NVIDIA_VISIBLE_DEVICES",
-                  "value": "none"
+                  "value": "void"
                 },
                 {
                   "name": "BUILDKIT_HOST",

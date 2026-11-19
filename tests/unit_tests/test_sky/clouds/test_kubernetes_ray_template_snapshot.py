@@ -137,7 +137,7 @@ def base_variables() -> Dict[str, Any]:
         'k8s_resource_key': None,
         'k8s_env_vars': {
             'SKYPILOT_IN_CLUSTER_CONTEXT_NAME': 'my-k8s-context',
-            'NVIDIA_VISIBLE_DEVICES': 'none',
+            'NVIDIA_VISIBLE_DEVICES': 'void',
         },
         'image_id': 'us-docker.pkg.dev/skypilot-oss/skypilot/skypilot:latest',
         'ray_installation_commands': 'RAY_INSTALLATION_COMMANDS',
@@ -370,7 +370,7 @@ CASES: Dict[str, Dict[str, Any]] = {
         'k8s_host_network': True,
         'k8s_env_vars': {
             'SKYPILOT_IN_CLUSTER_CONTEXT_NAME': 'my-k8s-context',
-            'NVIDIA_VISIBLE_DEVICES': 'none',
+            'NVIDIA_VISIBLE_DEVICES': 'void',
             'SKYPILOT_HOST_NETWORK': '1',
             'SKYPILOT_RAY_PORTS_CONFIGMAP_NAME': 'sky-cluster-abc123-ray-ports',
             'SKYPILOT_RAY_PORTS_CONFIGMAP_NAMESPACE': 'default',

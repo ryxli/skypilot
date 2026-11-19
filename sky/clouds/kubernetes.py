@@ -1071,17 +1071,13 @@ class Kubernetes(clouds.Cloud):
                 k8s_resource_key = kubernetes_utils.get_gpu_resource_key(
                     context)
         else:
-            # If no GPUs are requested, we set NVIDIA_VISIBLE_DEVICES=none to
-            # maintain GPU isolation. This is to override the default behavior
-            # of Nvidia device plugin which would expose all GPUs to the pod
-            # when no GPUs are requested.
-            # Note that NVIDIA_VISIBLE_DEVICES is different from
-            # CUDA_VISIBLE_DEVICES - the latter is used to control which GPUs
-            # are visible to the application and is set inside the pod, while
-            # the former is used to control which GPUs are visible to the pod
-            # through the nvidia runtime.
+            # CPU-only pods must not get GPU devices or driver capabilities,
+            # even on a CDI default runtime. 'none' can still fail CDI device
+            # resolution and enables driver capabilities; 'void' is runc-like.
+            # NVIDIA_VISIBLE_DEVICES is not CUDA_VISIBLE_DEVICES: the latter
+            # is set inside the pod, the former controls the pod's GPU access.
             # See: https://github.com/NVIDIA/k8s-device-plugin/issues/61
-            k8s_env_vars['NVIDIA_VISIBLE_DEVICES'] = 'none'
+            k8s_env_vars['NVIDIA_VISIBLE_DEVICES'] = 'void'
             avoid_label_keys = kubernetes_utils.get_accelerator_label_keys(
                 context)
             if len(avoid_label_keys) == 0:
