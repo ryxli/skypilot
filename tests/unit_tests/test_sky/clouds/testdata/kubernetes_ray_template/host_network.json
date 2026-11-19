@@ -99,7 +99,7 @@
                 },
                 {
                   "name": "NVIDIA_VISIBLE_DEVICES",
-                  "value": "none"
+                  "value": "void"
                 },
                 {
                   "name": "SKYPILOT_HOST_NETWORK",
