@@ -355,7 +355,10 @@ class SlurmClient:
         if self.slurm_user is None:
             return shlex.join(argv)
         return command_runner.wrap_command_as_user(
-            argv, self.slurm_user, use_sudo=self.ssh_user != 'root')
+            argv,
+            self.slurm_user,
+            use_sudo=self.ssh_user != 'root',
+            current_user=self.ssh_user)
 
     def _run_slurm_cmd(self,
                        cmd: Union[str, List[str]],
