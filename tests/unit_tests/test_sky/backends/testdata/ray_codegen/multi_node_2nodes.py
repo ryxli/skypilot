@@ -217,6 +217,7 @@ def run_with_log(
     streaming_prefix: Optional[str] = None,
     log_cmd: bool = False,
     timeout: Optional[int] = None,
+    forward_sigterm: bool = False,
     **kwargs,
 ) -> Union[int, Tuple[int, str, str], Tuple[int, int]]:
     """Runs a command and logs its output to a file.
@@ -234,6 +235,8 @@ def run_with_log(
         timeout: Optional timeout in seconds. If the command does not complete
             within this time, it will be terminated and TimeoutExpired will be
             raised. None means no timeout (default).
+        forward_sigterm: Whether to forward SIGTERM to the command's process
+            group while waiting for its exit. Only for dedicated executors.
 
     Returns the returncode or returncode, stdout and stderr of the command.
       Note that the stdout and stderr is already decoded.
@@ -273,6 +276,18 @@ def run_with_log(
                           shell=shell,
                           stdin=stdin,
                           **kwargs) as proc:
+        previous_sigterm_handler = None
+        if forward_sigterm:
+
+            def _forward_sigterm(signum, frame):
+                del frame
+                try:
+                    os.killpg(proc.pid, signum)
+                except ProcessLookupError:
+                    pass
+
+            previous_sigterm_handler = signal.signal(signal.SIGTERM,
+                                                     _forward_sigterm)
         try:
             if ctx is not None:
                 # When runs in coroutine, use kill_pg if available to avoid
@@ -398,6 +413,9 @@ def run_with_log(
             # causing the stream handling stuck at `readline`.
             subprocess_utils.kill_children_processes()
             raise
+        finally:
+            if forward_sigterm:
+                signal.signal(signal.SIGTERM, previous_sigterm_handler)
 
 def make_task_bash_script(codegen: str,
                           env_vars: Optional[Dict[str, str]] = None) -> str:
@@ -461,7 +479,8 @@ def run_bash_command_with_log(bash_command: str,
                               env_vars: Optional[Dict[str, str]] = None,
                               stream_logs: bool = False,
                               with_ray: bool = False,
-                              streaming_prefix: Optional[str] = None):
+                              streaming_prefix: Optional[str] = None,
+                              forward_sigterm: bool = False):
     with tempfile.NamedTemporaryFile('w', prefix='sky_app_',
                                      delete=False) as fp:
         bash_command = make_task_bash_script(bash_command, env_vars=env_vars)
@@ -471,12 +490,16 @@ def run_bash_command_with_log(bash_command: str,
 
         # Need this `-i` option to make sure `source ~/.bashrc` work.
         inner_command = f'/bin/bash -i {script_path}'
+        if forward_sigterm:
+            # Keep the script's exit code when TERM reaches the whole group.
+            inner_command = f'exec {inner_command}'
 
         return run_with_log(inner_command,
                             log_path,
                             stream_logs=stream_logs,
                             with_ray=with_ray,
                             streaming_prefix=streaming_prefix,
+                            forward_sigterm=forward_sigterm,
                             shell=True)
 
 def run_bash_command_with_log_and_return_pid(
