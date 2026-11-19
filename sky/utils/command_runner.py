@@ -167,10 +167,13 @@ _SSH_AUTH_FAILURE_PATTERNS = [
 
 def wrap_command_as_user(argv: List[str],
                          user: str,
-                         use_sudo: bool = False) -> str:
-    """Build a direct executable invocation as a Unix user."""
+                         use_sudo: bool = False,
+                         current_user: Optional[str] = None) -> str:
+    """Quote argv without switching users when the login identity matches."""
     if not argv or isinstance(argv, str):
         raise ValueError('User commands must be nonempty argument lists.')
+    if current_user is not None and user == current_user:
+        return shlex.join(argv)
     if use_sudo:
         prefix = ['sudo', '--non-interactive', '-H', '-u', user, '--']
     else:
@@ -2201,7 +2204,8 @@ class SlurmLoginNodeCommandRunner(SSHCommandRunner):
             return shlex.join(argv)
         return wrap_command_as_user(argv,
                                     self.slurm_user,
-                                    use_sudo=self._use_sudo)
+                                    use_sudo=self._use_sudo,
+                                    current_user=self.ssh_user)
 
     def run(
         self,
