@@ -499,6 +499,35 @@ class TestGetSlurmNodeInfoList:
         assert len(result) == 1
         assert result[0]['free_gpus'] == 8
 
+    @pytest.mark.parametrize(
+        ('state', 'free_gpus'),
+        [
+            ('idle~', 0),  # powered down
+            ('drain~', 0),  # powered down and drained
+            ('drain*', 0),  # drained, not responding
+            ('down*', 0),
+            ('idle*', 8),  # not responding, but schedulable
+            ('idle', 8),
+        ])
+    def test_flagged_states_count_free_gpus_by_base_state(
+            self, monkeypatch, state, free_gpus):
+        """Powered-down and unschedulable nodes have no free GPUs."""
+        fake_client = _FakeSlurmClient(
+            node_infos=[self._make_sinfo_node(state)],
+            node_details={
+                'node1': {
+                    'CfgTRES': 'cpu=192,mem=800G,billing=192,gres/gpu=8',
+                    'AllocTRES': '',
+                },
+            })
+        self._patch(monkeypatch, fake_client)
+
+        [node] = utils._get_slurm_node_info_list('cluster-a')
+
+        assert node['node_state'] == state
+        assert node['total_gpus'] == 8
+        assert node['free_gpus'] == free_gpus
+
     def test_fallback_when_tres_lacks_gpu(self, monkeypatch):
         """Fall back to squeue if the cluster does not track gres/gpu in TRES.
 

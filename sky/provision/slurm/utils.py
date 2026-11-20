@@ -1159,6 +1159,13 @@ def _get_slurm_node_info_list(slurm_cluster_name: str) -> List[Dict[str, Any]]:
                                        node_infos, node_details_by_name)
 
 
+# Flags `sinfo %t` appends to a node state, e.g. `drain~` (powered down),
+# `down*` (not responding), `mix-` (planned by backfill).
+_SLURM_NODE_STATE_FLAGS = '*~#!%$@^-'
+# Base states that cannot start a job.
+_UNSCHEDULABLE_NODE_STATES = ('down', 'drain', 'drng', 'maint')
+
+
 def _build_slurm_node_info_list(
     slurm_cluster_name: str,
     slurm_client: 'slurm.SlurmClient',
@@ -1180,6 +1187,7 @@ def _build_slurm_node_info_list(
     for node_info in node_infos:
         node_name = node_info.node
         state = node_info.state
+        base_state = state.rstrip(_SLURM_NODE_STATE_FLAGS)
         gres_str = node_info.gres
         partition = node_info.partition
 
@@ -1223,8 +1231,8 @@ def _build_slurm_node_info_list(
         if not use_tres and total_gpus > 0:
             # Fall back to job-level accounting via squeue.
             # TODO(zhwu): move to enum
-            if state in ('alloc', 'mix', 'drain', 'drng', 'drained', 'resv',
-                         'comp'):
+            if base_state in ('alloc', 'mix', 'drain', 'drng', 'drained',
+                              'resv', 'comp'):
                 if jobs_gres_by_node is None:
                     jobs_gres = _get_all_jobs_gres(slurm_client).get(
                         node_name, [])
@@ -1234,17 +1242,19 @@ def _build_slurm_node_info_list(
                     for job_line in jobs_gres:
                         _, job_gpu_count = get_gpu_type_and_count(job_line)
                         allocated_gpus += job_gpu_count
-                elif state == 'alloc':
+                elif base_state == 'alloc':
                     # If no GRES info found but node is fully allocated,
                     # assume all GPUs are in use.
                     allocated_gpus = total_gpus
-            elif state == 'idle':
+            elif base_state == 'idle':
                 allocated_gpus = 0
 
-        free_gpus = total_gpus - allocated_gpus if state not in ('down',
-                                                                 'drain',
-                                                                 'drng',
-                                                                 'maint') else 0
+        # A powered-down node cannot start a job until it is powered up, which
+        # a reservation or `no auto-provision` drain can prevent indefinitely.
+        if '~' in state or base_state in _UNSCHEDULABLE_NODE_STATES:
+            free_gpus = 0
+        else:
+            free_gpus = total_gpus - allocated_gpus
         free_gpus = max(0, free_gpus)
 
         # CPU/memory allocation + sampled usage from scontrol. All of
