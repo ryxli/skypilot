@@ -128,9 +128,17 @@ def get_recovery_status(
     Exceptions indicate an unavailable observation; callers retry within their
     transient-error window before escalating controller failure.
     """
-    if not _is_runtime_candidate(handle):
+    if handle is None:
         return None
-    for runtime in _claimants(handle):
+    claimants: typing.Iterable[ManagedJobRuntime]
+    if _is_runtime_candidate(handle):
+        claimants = _claimants(handle)
+    else:
+        claimants = (
+            r for r in _runtimes
+            if getattr(type(r), 'observes_ray_clusters', False) is True and
+            (owns := getattr(r, 'owns', None)) is not None and owns(handle))
+    for runtime in claimants:
         hook = getattr(runtime, 'get_recovery_status', None)
         if hook is not None:
             kwargs: Dict[str, typing.Any] = {
@@ -161,6 +169,10 @@ class ManagedJobRuntime(Protocol):
     the call site, or a non-None result to handle the operation. All
     methods are synchronous; async call sites wrap with
     ``asyncio.to_thread``.
+
+    A runtime may set the class attribute observes_ray_clusters to True to
+    provide recovery observations for Ray-backed clusters it owns. This
+    opt-in does not change other dispatch methods.
     """
 
     # pylint: disable=unnecessary-ellipsis

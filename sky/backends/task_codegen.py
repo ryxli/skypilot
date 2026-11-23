@@ -1,6 +1,7 @@
 """Code generator for task execution."""
 
 import copy
+import dataclasses
 import inspect
 import json
 import math
@@ -24,8 +25,20 @@ UNSET_RAY_ENV_VARS = ['RAY_RAYLET_PID']
 logger = sky_logging.init_logger(__name__)
 
 
+@dataclasses.dataclass(frozen=True)
+class RunFailurePolicy:
+    """Controls completion and retries for Ray run tasks."""
+
+    cancel_on_failure: bool = True
+    max_retries: Optional[int] = None
+    status_from: Literal['all', 'head'] = 'all'
+
+
 class TaskCodeGen:
     """Base code generator for task execution on Ray and Slurm."""
+
+    _failure_condition = 'sum(returncodes) != 0'
+    _cancelled_reason_condition = 'any(r == 137 for r in returncodes)'
 
     def __init__(self) -> None:
         # Code generated so far, to be joined via '\n'.
@@ -268,7 +281,7 @@ class TaskCodeGen:
 
         self._code += [
             textwrap.dedent(f"""\
-            if sum(returncodes) != 0:
+            if {self._failure_condition}:
                 # Save exit codes to job metadata for potential recovery logic
                 if int(constants.SKYLET_VERSION) >= 28:
                     job_lib.set_exit_codes({self.job_id!r}, returncodes)
@@ -282,7 +295,7 @@ class TaskCodeGen:
                 # 139 is the return code of SIGSEGV, i.e. Segmentation Fault.
                 if any(r == 139 for r in returncodes):
                     reason = '(likely due to Segmentation Fault)'
-                if any(r == 137 for r in returncodes):
+                if {self._cancelled_reason_condition}:
                     # Find the first non-137 return code
                     non_137 = next(r for r in returncodes if r != 137)
                     reason = f'(A Worker failed with return code {{non_137}}, SkyPilot cleaned up the processes on other nodes with return code 137)'
@@ -324,6 +337,16 @@ class RayCodeGen(TaskCodeGen):
       >> code = codegen.build()
     """
 
+    def __init__(self, failure_policy: RunFailurePolicy = RunFailurePolicy()):
+        super().__init__()
+        self._failure_policy = failure_policy
+        if failure_policy.status_from == 'head':
+            self._failure_condition = ('head_future_index is not None and '
+                                       'returncodes[head_future_index] != 0')
+        if failure_policy != RunFailurePolicy():
+            self._cancelled_reason_condition += (
+                ' and any(r != 137 for r in returncodes)')
+
     def add_prologue(self, job_id: int) -> None:
         assert not self._has_prologue, 'add_prologue() called twice?'
         self._has_prologue = True
@@ -354,6 +377,33 @@ class RayCodeGen(TaskCodeGen):
         self._add_skylet_imports()
 
         self._add_constants()
+        wait_parameters = []
+        stop_on = 'res[\'return_code\'] != 0'
+        ray_get = 'res = ray.get(task)'
+        if not self._failure_policy.cancel_on_failure:
+            self._code.append('NODE_LOST_RETURN_CODE = 250')
+            wait_parameters.append('cancel_on_failure=True')
+            stop_on = f'cancel_on_failure and {stop_on}'
+            ray_get = ('try:\n'
+                       '                            res = ray.get(task)\n'
+                       '                        except '
+                       'ray.exceptions.RayError:\n'
+                       '                            if cancel_on_failure:\n'
+                       '                                raise\n'
+                       '                            res = {\'return_code\': '
+                       'NODE_LOST_RETURN_CODE, \'pid\': None}')
+
+        head_index_init = ''
+        if self._failure_policy.status_from == 'head':
+            wait_parameters.append('head_future_index=None')
+            stop_on = f'idx == head_future_index or ({stop_on})'
+            head_index_init = '\n            head_future_index = None'
+
+        wait_doc = ('Wait for tasks and cancel unready tasks per policy.'
+                    if wait_parameters else
+                    'Wait for tasks, if any fails, cancel all unready.')
+        wait_signature = (', *, ' +
+                          ', '.join(wait_parameters) if wait_parameters else '')
 
         # Add Ray configuration
         self._code.append(
@@ -370,8 +420,8 @@ class RayCodeGen(TaskCodeGen):
                 log_to_driver=True,
                 **kwargs
             )
-            def get_or_fail(futures, pg) -> List[int]:
-                \"\"\"Wait for tasks, if any fails, cancel all unready.\"\"\"
+            def get_or_fail(futures, pg{wait_signature}) -> List[int]:
+                \"\"\"{wait_doc}\"\"\"
                 if not futures:
                     return [], []
                 returncodes = [1] * len(futures)
@@ -390,10 +440,10 @@ class RayCodeGen(TaskCodeGen):
                     nonlocal returncodes, pids, failed
                     for task in tasks:
                         idx = futures.index(task)
-                        res = ray.get(task)
+                        {ray_get}
                         returncodes[idx] = res['return_code']
                         pids[idx] = res['pid']
-                        if res['return_code'] != 0:
+                        if {stop_on}:
                             failed = True
 
                 while not ready:
@@ -419,7 +469,7 @@ class RayCodeGen(TaskCodeGen):
                 sys.stdout.flush()
                 return returncodes, pids
 
-            futures = []
+            futures = []{head_index_init}
             """))
 
         self._add_logging_functions()
@@ -619,6 +669,8 @@ class RayCodeGen(TaskCodeGen):
         #   num_gpus=...
         options = []
         options.append(f'num_cpus={task_cpu_demand}')
+        if self._failure_policy.max_retries is not None:
+            options.append(f'max_retries={self._failure_policy.max_retries}')
 
         acc_name, acc_count = self._get_accelerator_details(resources_dict)
         num_gpus = 0.0
@@ -654,6 +706,9 @@ class RayCodeGen(TaskCodeGen):
         per_ip_env_vars_str = ('\n            sky_env_vars_dict.update('
                                f'{self._per_ip_env_vars!r}.get(ip, {{}}))'
                                if self._per_ip_env_vars else '')
+        head_index_record = (
+            '\n                    head_future_index = len(futures)'
+            if self._failure_policy.status_from == 'head' else '')
         logger.debug('Added Task with options: '
                      f'{options_str}')
         unset_ray_env_vars = ' && '.join(
@@ -678,7 +733,7 @@ class RayCodeGen(TaskCodeGen):
             else: # Single-node or multi-node task on multi-node cluster
                 idx_in_cluster = cluster_ips_to_node_id.get(ip, len(cluster_ips_to_node_id) + {gang_scheduling_id!r})
                 if idx_in_cluster == 0:
-                    node_name = 'head'
+                    node_name = 'head'{head_index_record}
                 else:
                     node_name = f'worker{{idx_in_cluster}}'
                 name_str = f'{{node_name}}, rank={{rank}},'
@@ -700,7 +755,13 @@ class RayCodeGen(TaskCodeGen):
 
     def add_epilogue(self) -> None:
         """Generates code that waits for all tasks, then exits."""
-        self._code.append('returncodes, _ = get_or_fail(futures, pg)')
+        wait_options = ''
+        if not self._failure_policy.cancel_on_failure:
+            wait_options += ', cancel_on_failure=False'
+        if self._failure_policy.status_from == 'head':
+            wait_options += ', head_future_index=head_future_index'
+        self._code.append(f'returncodes, _ = get_or_fail(futures, pg'
+                          f'{wait_options})')
         super().add_epilogue()
 
 

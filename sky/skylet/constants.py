@@ -701,6 +701,7 @@ CONTAINER_OUTPUT_MARKER = 'Last output from container'
 OVERRIDEABLE_CONFIG_KEYS_IN_TASK: List[Tuple[str, ...]] = [
     ('docker', 'run_options'),
     ('nvidia_gpus', 'disable_ecc'),
+    ('run_failure_policy',),
     ('ssh', 'custom_metadata'),
     ('ssh', 'pod_config'),
     ('ssh', 'provision_timeout'),

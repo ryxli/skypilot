@@ -3394,6 +3394,25 @@ def get_config_schema():
             'admin_policy': admin_policy_schema,
             'docker': docker_configs,
             'nvidia_gpus': gpu_configs,
+            'run_failure_policy': {
+                'type': 'object',
+                'additionalProperties': False,
+                'properties': {
+                    'cancel_on_failure': {
+                        'type': 'boolean',
+                        'default': True,
+                    },
+                    'max_retries': {
+                        'type': 'integer',
+                        'minimum': 0,
+                    },
+                    'status_from': {
+                        'type': 'string',
+                        'enum': ['all', 'head'],
+                        'default': 'all',
+                    },
+                },
+            },
             'api_server': api_server,
             'active_workspace': workspace_schema,
             'workspaces': workspaces_schema,

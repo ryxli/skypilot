@@ -7223,9 +7223,12 @@ class CloudVmRayBackend(backends.Backend['CloudVmRayResourceHandle']):
         return None
 
     def _get_task_codegen_class(
-            self,
-            handle: CloudVmRayResourceHandle,
-            task: Optional[task_lib.Task] = None) -> task_codegen.TaskCodeGen:
+        self,
+        handle: CloudVmRayResourceHandle,
+        task: Optional[task_lib.Task] = None,
+        failure_policy: task_codegen.RunFailurePolicy = (
+            task_codegen.RunFailurePolicy())
+    ) -> task_codegen.TaskCodeGen:
         """Returns the appropriate TaskCodeGen for the given handle."""
         if isinstance(handle.launched_resources.cloud, clouds.Slurm):
             assert (handle.cached_cluster_info
@@ -7260,7 +7263,7 @@ class CloudVmRayBackend(backends.Backend['CloudVmRayResourceHandle']):
                 fresh_setup_env=task.envs if task is not None else None,
             )
         else:
-            return task_codegen.RayCodeGen()
+            return task_codegen.RayCodeGen(failure_policy=failure_policy)
 
     @staticmethod
     def _get_task_demands_dict(handle: CloudVmRayResourceHandle,
@@ -7343,7 +7346,14 @@ class CloudVmRayBackend(backends.Backend['CloudVmRayResourceHandle']):
             kubernetes_utils.tpu_vms_per_slice(handle.launched_resources))
         task_env_vars = self._get_task_env_vars(task, job_id, handle)
 
-        codegen = self._get_task_codegen_class(handle, task)
+        failure_policy = task_codegen.RunFailurePolicy()
+        if not isinstance(handle.launched_resources.cloud, clouds.Slurm):
+            resources = task.best_resources or next(iter(task.resources))
+            failure_policy = task_codegen.RunFailurePolicy(
+                **skypilot_config.get_nested(
+                    ('run_failure_policy',), {},
+                    override_configs=resources.cluster_config_overrides))
+        codegen = self._get_task_codegen_class(handle, task, failure_policy)
         # Each VM of a multi-host TPU slice on Kubernetes gets its worker
         # identity, which the provisioner recorded on the node.
         if handle.cached_cluster_info is not None:
