@@ -132,6 +132,27 @@ def test_epilogue_uses_head_return_code(head_return_code):
         job_lib.set_exit_codes.assert_called_once_with(1, [137, 137])
 
 
+def test_run_without_a_head_task_fails_on_any_node():
+    code = _build(task_codegen.RayCodeGen(failure_policy=_HEAD_POLICY))
+    namespace, cancel = _run_wait(code, {
+        'worker1': 0,
+        'worker2': 3
+    }, ['worker1', 'worker2'],
+                                  head_future_index=None)
+    assert namespace['returncodes'] == [0, 3]
+    cancel.assert_not_called()
+    namespace.update(job_lib=mock.Mock(),
+                     time=mock.Mock(),
+                     constants=SimpleNamespace(SKYLET_VERSION=28))
+    epilogue = compile(
+        ast.Module(body=ast.parse(code).body[-1:], type_ignores=[]),
+        '<driver epilogue>', 'exec')
+    with pytest.raises(SystemExit):
+        exec(epilogue, namespace)
+    job_lib = namespace['job_lib']
+    job_lib.set_status.assert_called_once_with(1, job_lib.JobStatus.FAILED)
+
+
 def test_task_yaml_policy_reaches_multi_node_driver():
     task = task_lib.Task.from_yaml_str('''
 num_nodes: 2

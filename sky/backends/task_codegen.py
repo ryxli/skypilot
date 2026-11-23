@@ -341,8 +341,10 @@ class RayCodeGen(TaskCodeGen):
         super().__init__()
         self._failure_policy = failure_policy
         if failure_policy.status_from == 'head':
-            self._failure_condition = ('head_future_index is not None and '
-                                       'returncodes[head_future_index] != 0')
+            # A run that does not include the head keeps the all-nodes rule.
+            self._failure_condition = (
+                '(sum(returncodes) if head_future_index is None else '
+                'returncodes[head_future_index]) != 0')
         if failure_policy != RunFailurePolicy():
             self._cancelled_reason_condition += (
                 ' and any(r != 137 for r in returncodes)')
