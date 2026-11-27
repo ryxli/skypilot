@@ -2545,7 +2545,7 @@ def test_create_keeps_staging_and_readiness_in_native_lifecycle(
     monkeypatch.setattr(instance.rich_utils, 'force_update_status',
                         lambda _: None)
     wait_nodes = mock.Mock(side_effect=lambda *_a, **_k: events.append('nodes'))
-    ready = mock.Mock(side_effect=lambda *_: events.append('ready'))
+    ready = mock.Mock(side_effect=lambda *_a, **_k: events.append('ready'))
     monkeypatch.setattr(instance, '_wait_for_job_ready', ready)
     renderer = mock.Mock(
         side_effect=lambda **_: events.append('render') or '#!/bin/bash\n')
@@ -2570,6 +2570,7 @@ def test_create_keeps_staging_and_readiness_in_native_lifecycle(
         return '123'
 
     client.submit_job.side_effect = submit
+    on_ready_wait = mock.Mock()
 
     record = instance.create_virtual_instance(
         'test',
@@ -2580,14 +2581,18 @@ def test_create_keeps_staging_and_readiness_in_native_lifecycle(
         render_script=renderer,
         stage_files=stage,
         wait_for_job_nodes=wait_nodes,
+        on_ready_wait=on_ready_wait,
         partition_info=instance.slurm.SlurmPartition('dev', False, 3600, None))
 
     assert record.head_instance_id == 'job123-node'
     wait_nodes.assert_called_once_with(client, '123', 60, 'dev', mock.ANY)
     ready.assert_called_once_with(
-        runner, client, '123',
+        runner,
+        client,
+        '123',
         '/shared/sky/.sky_clusters/test/.sky_sbatch_ready',
-        '/shared/sky/.sky_provision/slurm-123.out')
+        '/shared/sky/.sky_provision/slurm-123.out',
+        on_wait=on_ready_wait)
     if existing:
         assert events == ['nodes', 'ready']
         renderer.assert_not_called()
@@ -2752,3 +2757,36 @@ def test_renderer_requires_newline_terminated_trusted_fragments(
         with pytest.raises(AssertionError,
                            match=f'{field} must end with a newline'):
             instance.render_provision_script(**inputs)
+
+
+@pytest.mark.parametrize('ready', [True, False])
+def test_readiness_callback_can_pause_without_teardown(monkeypatch, ready):
+    runner = mock.Mock()
+    runner.command_as_user.side_effect = shlex.join
+    client = mock.Mock()
+    client.get_job_state.return_value = 'RUNNING'
+    monkeypatch.setattr(instance, '_run_on_login_node', lambda *_a, **_k:
+                        (0 if ready else 1, ''))
+    pause = exceptions.ExecutionPausedError('initializing', 'wait', 10)
+    on_wait = mock.Mock(side_effect=pause)
+    if ready:
+        instance._wait_for_job_ready(runner,
+                                     client,
+                                     '123',
+                                     '/sky/ready',
+                                     '/sky/slurm.out',
+                                     on_wait=on_wait)
+        on_wait.assert_not_called()
+        client.get_job_state.assert_not_called()
+    else:
+        with pytest.raises(exceptions.ExecutionPausedError) as caught:
+            instance._wait_for_job_ready(runner,
+                                         client,
+                                         '123',
+                                         '/sky/ready',
+                                         '/sky/slurm.out',
+                                         on_wait=on_wait)
+        assert caught.value is pause
+        on_wait.assert_called_once_with('123')
+    runner.run.assert_not_called()
+    client.cancel_job.assert_not_called()
