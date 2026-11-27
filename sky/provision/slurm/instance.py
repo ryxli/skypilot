@@ -1187,12 +1187,14 @@ def _wait_for_job_ready(
     job_id: str,
     ready_signal: str,
     slurm_log: str,
+    *,
+    on_wait: Optional[Callable[[str], None]] = None,
 ) -> None:
     """Wait for Slurm job initialization to complete.
 
-    Polls while the job is running. Fails if:
-    1. The job exits/fails (state not in PENDING/RUNNING/CONFIGURING)
-    2. The ready signal file never appears
+    The optional callback receives the job ID after an unsuccessful probe of
+    a live allocation. It may pause the request; the next attempt reattaches
+    to the same job and probes readiness again.
     """
     poll_interval_seconds = 1
     # An NFS client keeps a failed lookup until the directory's cached
@@ -1226,6 +1228,8 @@ def _wait_for_job_ready(
                     f'Slurm job {job_id} exited ({job_state}) '
                     'before initialization completed. See sbatch '
                     f'logs for details: {slurm_log}')
+            if on_wait is not None:
+                on_wait(job_id)
             time.sleep(poll_interval_seconds)
     except (RuntimeError, exceptions.CommandError) as error:
         stdout = ''
@@ -1728,6 +1732,7 @@ def create_virtual_instance(
                                    None]] = None,
     wait_for_job_nodes: Optional[Callable[..., None]] = None,
     partition_info: Optional['slurm.SlurmPartition'] = None,
+    on_ready_wait: Optional[Callable[[str], None]] = None,
 ) -> common.ProvisionRecord:
     """Creates a Slurm virtual instance from the config.
 
@@ -1818,9 +1823,12 @@ def create_virtual_instance(
             ux_utils.spinner_message('Launching', cluster_name=cluster_name))
         base_dir = _resolve_sky_base_dir(client, provider_config)
         _wait_for_job_ready(
-            _make_login_node_runner(provider_config), client, job_id,
-            f'{_sky_cluster_home_dir(base_dir, cluster_name_on_cloud)}'
-            '/.sky_sbatch_ready', _sbatch_log_path(base_dir, job_id))
+            _make_login_node_runner(provider_config),
+            client,
+            job_id, f'{_sky_cluster_home_dir(base_dir, cluster_name_on_cloud)}'
+            '/.sky_sbatch_ready',
+            _sbatch_log_path(base_dir, job_id),
+            on_wait=on_ready_wait)
         return common.ProvisionRecord(
             provider_name='slurm',
             region=region,
@@ -1936,6 +1944,7 @@ def create_virtual_instance(
         job_id,
         ready_signal,
         slurm_log,
+        on_wait=on_ready_wait,
     )
 
     return common.ProvisionRecord(
