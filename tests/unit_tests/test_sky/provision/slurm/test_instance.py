@@ -2497,11 +2497,11 @@ def test_render_provision_script_has_no_control_plane_side_effects(
         assert '--container-image=' not in script
 
 
-@pytest.mark.parametrize(('existing', 'restoring'), [(False, False),
-                                                     (False, True),
-                                                     (True, False)])
+@pytest.mark.parametrize(('existing', 'restoring', 'resuming'),
+                         [(False, False, False), (False, True, False),
+                          (True, False, False), (True, False, True)])
 def test_create_keeps_staging_and_readiness_in_native_lifecycle(
-        monkeypatch, existing, restoring):
+        monkeypatch, existing, restoring, resuming):
     provider = dict(_PROVIDER_CONFIG,
                     cluster='test',
                     partition='dev',
@@ -2582,6 +2582,7 @@ def test_create_keeps_staging_and_readiness_in_native_lifecycle(
         stage_files=stage,
         wait_for_job_nodes=wait_nodes,
         on_ready_wait=on_ready_wait,
+        resume_job_id='123' if resuming else None,
         partition_info=instance.slurm.SlurmPartition('dev', False, 3600, None))
 
     assert record.head_instance_id == 'job123-node'
@@ -2601,6 +2602,8 @@ def test_create_keeps_staging_and_readiness_in_native_lifecycle(
         assert record.created_instance_ids == []
         assert prepared == []
         client.get_remote_home_dir.assert_not_called()
+        if resuming:
+            client.query_jobs.assert_not_called()
     else:
         expected = ['render'] + (['cleanup'] if restoring else [])
         assert events == expected + ['stage', 'submit', 'nodes', 'ready']

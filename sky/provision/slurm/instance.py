@@ -9,7 +9,8 @@ import subprocess
 import tempfile
 import threading
 import time
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
+from typing import (Any, Callable, Dict, List, NoReturn, Optional, Set, Tuple,
+                    Union)
 import uuid
 
 import colorama
@@ -1232,20 +1233,29 @@ def _wait_for_job_ready(
                 on_wait(job_id)
             time.sleep(poll_interval_seconds)
     except (RuntimeError, exceptions.CommandError) as error:
-        stdout = ''
-        try:
-            _, stdout, _ = login_node_runner.run(['cat', '--', slurm_log],
-                                                 require_outputs=True,
-                                                 stream_logs=False)
-        except (exceptions.CommandError, OSError, RuntimeError,
-                subprocess.SubprocessError) as log_error:
-            logger.debug(f'Failed to read Slurm startup log: {log_error}')
-        if stdout:
-            logger.error(f'=== Slurm job logs ({slurm_log}) ===\n'
-                         f'{stdout}'
-                         f'=== End of Slurm job logs ===')
-        raise exceptions.SlurmStartupError(str(error), job_id,
-                                           stdout) from error
+        _raise_startup_error(login_node_runner, job_id, slurm_log, error)
+
+
+def _raise_startup_error(
+    login_node_runner: 'command_runner.SSHCommandRunner',
+    job_id: str,
+    slurm_log: str,
+    error: BaseException,
+) -> NoReturn:
+    """Read startup diagnostics and raise the allocation's original failure."""
+    stdout = ''
+    try:
+        _, stdout, _ = login_node_runner.run(['cat', '--', slurm_log],
+                                             require_outputs=True,
+                                             stream_logs=False)
+    except (exceptions.CommandError, OSError, RuntimeError,
+            subprocess.SubprocessError) as log_error:
+        logger.debug(f'Failed to read Slurm startup log: {log_error}')
+    if stdout:
+        logger.error(f'=== Slurm job logs ({slurm_log}) ===\n'
+                     f'{stdout}'
+                     f'=== End of Slurm job logs ===')
+    raise exceptions.SlurmStartupError(str(error), job_id, stdout) from error
 
 
 def get_accelerator_count(resources: Dict[str, Any]) -> int:
@@ -1733,6 +1743,7 @@ def create_virtual_instance(
     wait_for_job_nodes: Optional[Callable[..., None]] = None,
     partition_info: Optional['slurm.SlurmPartition'] = None,
     on_ready_wait: Optional[Callable[[str], None]] = None,
+    resume_job_id: Optional[str] = None,
 ) -> common.ProvisionRecord:
     """Creates a Slurm virtual instance from the config.
 
@@ -1743,6 +1754,8 @@ def create_virtual_instance(
     callables. Staging runs only for a new allocation, after snapshot cleanup
     and before submission. Node waiters use the native five-argument contract;
     registered provisioners bind any additional policy context.
+    A supplied resume_job_id pins reattachment to that allocation, including
+    after it ends; it must never fall through to a replacement submission.
     """
     provider_config = config.provider_config
     partition = slurm_utils.get_partition_from_config(provider_config)
@@ -1765,10 +1778,10 @@ def create_virtual_instance(
     # cancelled or has finished. Jobs can get stuck in COMPLETING if epilog
     # scripts hang or tasks don't respond to signals, so we wait with a
     # timeout.
-    completing_jobs = client.query_jobs(
+    completing_jobs = ([] if resume_job_id is not None else client.query_jobs(
         cluster_name_on_cloud,
         ['completing'],
-    )
+    ))
     start_time = time.time()
     while (completing_jobs and
            time.time() - start_time < _JOB_TERMINATION_TIMEOUT_SECONDS):
@@ -1789,10 +1802,13 @@ def create_virtual_instance(
                            'associated with the job.')
 
     # Check if job already exists
-    existing_jobs = client.query_jobs(
-        cluster_name_on_cloud,
-        ['pending', 'configuring', 'running'],
-    )
+    if resume_job_id is not None:
+        existing_jobs = [resume_job_id]
+    else:
+        existing_jobs = client.query_jobs(
+            cluster_name_on_cloud,
+            ['pending', 'configuring', 'running'],
+        )
 
     provision_timeout: int = provider_config['provision_timeout']
     wait_str = ('indefinitely'
@@ -1812,18 +1828,23 @@ def create_virtual_instance(
         logger.debug(f'Job with name {cluster_name_on_cloud} already exists '
                      f'(JOBID: {job_id})')
         _record_allocation(cluster_name, slurm_cluster, job_id)
+        base_dir = _resolve_sky_base_dir(client, provider_config)
+        login_node_runner = _make_login_node_runner(provider_config)
 
         # Wait for nodes to be allocated (job might be in PENDING state)
-        wait_for_job_nodes(client, job_id, provision_timeout, partition,
-                           on_pending)
+        try:
+            wait_for_job_nodes(client, job_id, provision_timeout, partition,
+                               on_pending)
+        except RuntimeError as error:
+            _raise_startup_error(login_node_runner, job_id,
+                                 _sbatch_log_path(base_dir, job_id), error)
         _record_nodes_allocated(cluster_name, slurm_cluster, job_id)
         nodes, _ = client.get_job_nodes(job_id)
         # Reset spinner since nodes are now allocated
         rich_utils.force_update_status(
             ux_utils.spinner_message('Launching', cluster_name=cluster_name))
-        base_dir = _resolve_sky_base_dir(client, provider_config)
         _wait_for_job_ready(
-            _make_login_node_runner(provider_config),
+            login_node_runner,
             client,
             job_id, f'{_sky_cluster_home_dir(base_dir, cluster_name_on_cloud)}'
             '/.sky_sbatch_ready',
